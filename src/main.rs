@@ -1,6 +1,7 @@
 mod network;
 mod storage;
 mod error;
+mod server;
 
 use clap::Parser;
 use error::Error;
