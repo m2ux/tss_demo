@@ -65,6 +65,7 @@
 //! * Message serialization errors
 //! * Client registration conflicts
 
+use crate::network::WireMessage;
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{mpsc, RwLock},
@@ -251,7 +252,7 @@ impl WsServer {
     /// * Protocol violations
     async fn handle_connection(
         stream: TcpStream,
-        addr: SocketAddr,
+        _addr: SocketAddr,
         clients: Arc<RwLock<HashMap<u16, ClientSession>>>,
     ) -> Result<(), ServerError> {
         let ws_stream = accept_async(stream).await?;
@@ -260,7 +261,7 @@ impl WsServer {
         // Handle party ID registration
         let party_id = match ws_receiver.next().await {
             Some(Ok(msg)) => {
-                if let Ok(id) = String::from_utf8(msg.into_data())
+                if let Some(id) = String::from_utf8(msg.into_data())
                     .ok()
                     .and_then(|s| s.parse::<u16>().ok())
                 {

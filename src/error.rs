@@ -67,8 +67,11 @@ use crate::storage;
 pub enum Error {
     /// Errors that occur during the execution of the CGGMP21 protocol.
     /// These are protocol-specific errors such as invalid shares, failed verification, etc.
-    #[error("Protocol error: {0}")]
-    Protocol(#[from] cggmp21::KeygenError),
+    #[error("Keygen error: {0}")]
+    Keygen(#[from] cggmp21::KeygenError),
+
+    #[error("KeyRefresh error: {0}")]
+    KeyRefresh(#[from] cggmp21::KeyRefreshError),
 
     /// Network communication errors, including connection failures,
     /// message delivery issues, and WebSocket-related problems.
@@ -89,4 +92,8 @@ pub enum Error {
     /// typically when processing messages or storing data.
     #[error("Serialization error: {0}")]
     Serialization(#[from] bincode::Error),
+
+    /// Message parsing or protocol errors
+    #[error("Message error: {0}")]
+    Message(String),
 }

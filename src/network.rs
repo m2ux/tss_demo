@@ -149,6 +149,7 @@ pub struct WsReceiver<M> {
 pub struct WsDelivery<M> {
     sender: WsSender<M>,
     receiver: WsReceiver<M>,
+    server_addr: String,
 }
 
 /// Internal message format for wire transmission.
@@ -215,7 +216,13 @@ where
                 message_state: MessageState::new(),
                 _phantom: PhantomData
             },
+            server_addr: server_addr.to_string(),
         })
+    }
+
+    /// Returns the server address this delivery instance is connected to
+    pub fn addr(&self) -> &str {
+        &self.server_addr
     }
 }
 
