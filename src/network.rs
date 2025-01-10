@@ -2,8 +2,30 @@ use futures::{Stream, Sink, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, WebSocketStream, MaybeTlsStream};
 use round_based::{Delivery, MessageDestination};
-use std::{marker::PhantomData, pin::Pin};
+use std::{marker::PhantomData, pin::Pin, sync::atomic::{AtomicU64, Ordering}, num::Wrapping};
 use futures::channel::mpsc;
+
+/// Thread-safe message ID generator with overflow handling
+struct MessageIdGenerator {
+    counter: AtomicU64,
+}
+
+impl MessageIdGenerator {
+    const fn new() -> Self {
+        Self {
+            counter: AtomicU64::new(0),
+        }
+    }
+
+    fn next_id(&self) -> u64 {
+        // Use wrapping add via Wrapping to handle overflow gracefully
+        let Wrapping(next_id) = Wrapping(self.counter.load(Ordering::SeqCst)) + Wrapping(1);
+        self.counter.store(next_id, Ordering::SeqCst);
+        next_id
+    }
+}
+
+static MESSAGE_ID_GEN: MessageIdGenerator = MessageIdGenerator::new();
 
 #[derive(Debug, thiserror::Error)]
 pub enum NetworkError {
@@ -15,6 +37,41 @@ pub enum NetworkError {
 
     #[error("Channel closed")]
     ChannelClosed,
+
+    #[error("Invalid message ID: expected >= {expected}, got {actual}")]
+    InvalidMessageId {
+        expected: u64,
+        actual: u64,
+    },
+}
+
+#[derive(Debug)]
+struct MessageState {
+    last_id: Wrapping<u64>,
+}
+
+impl MessageState {
+    fn new() -> Self {
+        Self {
+            last_id: Wrapping(0),
+        }
+    }
+
+    fn validate_and_update_id(&mut self, id: u64) -> Result<(), NetworkError> {
+        let current = self.last_id;
+        let new_id = Wrapping(id);
+
+        // Allow wraparound but ensure monotonic increase
+        if new_id < current {
+            return Err(NetworkError::InvalidMessageId {
+                expected: current.0,
+                actual: id,
+            });
+        }
+
+        self.last_id = new_id;
+        Ok(())
+    }
 }
 
 pub struct WsSender<M> {
@@ -25,6 +82,7 @@ pub struct WsSender<M> {
 
 pub struct WsReceiver<M> {
     receiver: mpsc::UnboundedReceiver<Vec<u8>>,
+    message_state: MessageState,
     _phantom: PhantomData<M>,
 }
 
@@ -75,6 +133,7 @@ where
             },
             receiver: WsReceiver {
                 receiver: rx,
+                message_state: MessageState::new(),
                 _phantom: PhantomData
             },
         })
@@ -104,7 +163,7 @@ where
 
     fn start_send(self: Pin<&mut Self>, item: round_based::Outgoing<M>) -> Result<(), Self::Error> {
         let wire_msg = WireMessage {
-            id: 0, // Static value to fix compilation. CHANGE ME!
+            id: MESSAGE_ID_GEN.next_id(),
             sender: self.party_id,
             receiver: WireMessage::from_message_destination(Some(item.recipient)),
             payload: bincode::serialize(&item.msg).map_err(|_| NetworkError::Connection("Serialization failed".into()))?,
@@ -132,9 +191,10 @@ where
 {
     type Item = Result<round_based::Incoming<M>, NetworkError>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
-        let receiver = unsafe { &mut self.get_unchecked_mut().receiver };
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+        let receiver = unsafe { &mut self.as_mut().get_unchecked_mut().receiver };
         let poll_result = Pin::new(receiver).poll_next(cx);
+        let message_state = unsafe { &mut self.get_unchecked_mut().message_state };
 
         match poll_result {
             std::task::Poll::Ready(Some(data)) => {
@@ -142,6 +202,11 @@ where
                     Ok(msg) => msg,
                     Err(_) => return std::task::Poll::Ready(Some(Err(NetworkError::Connection("Deserialization failed".into()))))
                 };
+
+                // Validate message ID
+                if let Err(e) = message_state.validate_and_update_id(wire_msg.id) {
+                    return std::task::Poll::Ready(Some(Err(e)));
+                }
 
                 let message = match bincode::deserialize(&wire_msg.payload) {
                     Ok(msg) => msg,
