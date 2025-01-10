@@ -52,22 +52,20 @@ mod storage;
 mod error;
 mod server;
 mod protocol;
+mod service;
 
 use clap::Parser;
 use error::Error;
-use futures::StreamExt;
 use network::WsDelivery;
-use protocol::{discover_committee_members,run_committee_mode};
+use protocol::run_committee_mode;
 use cggmp21::{
     supported_curves::Secp256k1,
     keygen::ThresholdMsg,
     security_level::SecurityLevel128,
 };
+use service::run_service_mode;
 use storage::KeyStorage;
 use sha2::Sha256;
-use round_based::Delivery;
-use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
 use tokio::sync::oneshot;
 
 /// Internal state tracking for signing sessions
@@ -76,40 +74,16 @@ struct SigningSession {
     party_id: u16,
 }
 
-/// Manages active signing sessions
-struct SigningSessionManager {
-    sessions: HashMap<u16, SigningSession>,
-}
-
-impl SigningSessionManager {
-    fn new() -> Self {
-        Self {
-            sessions: HashMap::new(),
-        }
-    }
-
-    fn add_session(&mut self, party_id: u16, response_channel: oneshot::Sender<()>) {
-        self.sessions.insert(party_id, SigningSession {
-            response_channel,
-            party_id,
-        });
-    }
-
-    fn remove_session(&mut self, party_id: u16) -> Option<SigningSession> {
-        self.sessions.remove(&party_id)
-    }
-}
-
 /// Operation modes for the application
 #[derive(Debug)]
 enum OperationMode {
     /// Participate in the signing committee
     Committee,
-    /// Initiate a signing operation
-    Sign(String),
+    /// Operate as a signing service
+    Service(String),
 }
 
-/// Command-line arguments for the CGGMP21 demo application
+/// Command-line arguments
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -140,7 +114,7 @@ async fn main() -> Result<(), Error> {
     let mode = if args.committee {
         OperationMode::Committee
     } else if let Some(msg) = args.message.clone() {
-        OperationMode::Sign(msg)
+        OperationMode::Service(msg)
     } else {
         return Err(Error::Config("Either --committee or --message must be specified".into()));
     };
@@ -155,40 +129,15 @@ async fn main() -> Result<(), Error> {
     type Msg = ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>;
     let delivery = WsDelivery::<Msg>::connect(&args.server, args.party_id).await?;
 
+    // Select operating mode
     match mode {
         OperationMode::Committee => {
             run_committee_mode(delivery, storage, args.party_id).await?;
         },
-        OperationMode::Sign(message) => {
-            run_signing_mode(delivery, storage, args.party_id, message).await?;
+        OperationMode::Service(message) => {
+            run_service_mode(delivery, storage, args.party_id, message).await?;
         }
     }
-
-    Ok(())
-}
-
-/// Runs the application in signing mode, initiating a signing operation
-async fn run_signing_mode(
-    _delivery: WsDelivery<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>,
-    _storage: KeyStorage,
-    _party_id: u16,
-    message: String,
-) -> Result<(), Error> {
-    println!("Starting signing process for message: {}", message);
-
-    // Discover available committee members
-    let committee = discover_committee_members().await?;
-    println!("Found {} committee members", committee.len());
-
-    // Check if we have enough committee members for threshold
-    if committee.len() < 3 {
-        return Err(Error::Config("Not enough committee members available (minimum 3 required)".into()));
-    }
-
-    //TODO
-
-    // Display the resulting signature
-    println!("Signature generated successfully:");
 
     Ok(())
 }

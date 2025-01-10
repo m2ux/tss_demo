@@ -1,4 +1,4 @@
-use crate::network;
+use crate::{network, SigningSession};
 use crate::error::Error;
 use futures::StreamExt;
 use crate::network::{WsDelivery, NetworkError};
@@ -15,7 +15,32 @@ use sha2::Sha256;
 use rand_core::OsRng;
 use round_based::{Delivery,MpcParty};
 use serde::{Serialize, Deserialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use tokio::sync::oneshot;
+
+/// Manages active signing sessions
+struct SigningSessionManager {
+    sessions: HashMap<u16, SigningSession>,
+}
+
+impl SigningSessionManager {
+    fn new() -> Self {
+        Self {
+            sessions: HashMap::new(),
+        }
+    }
+
+    fn add_session(&mut self, party_id: u16, response_channel: oneshot::Sender<()>) {
+        self.sessions.insert(party_id, SigningSession {
+            response_channel,
+            party_id,
+        });
+    }
+
+    fn remove_session(&mut self, party_id: u16) -> Option<SigningSession> {
+        self.sessions.remove(&party_id)
+    }
+}
 
 /// Protocol message types for WebSocket communication
 #[derive(Serialize, Deserialize, Debug)]
@@ -66,7 +91,7 @@ enum CommitteeState {
 /// Message types that can be received from the network
 #[derive(Debug)]
 enum NetworkMessage<M> {
-    /// Protocol-specific messages (ThresholdMsg)
+    /// Protocol-specific messages
     Protocol(round_based::Incoming<M>),
     /// Our custom protocol messages
     Control(ProtocolMessage),
@@ -173,7 +198,7 @@ pub async fn run_committee_mode(
                 _ => {}
             },
             NetworkMessage::Protocol(_) => {
-                // Handle protocol-specific messages if needed
+                // Handle protocol-specific messages (TBD)
             }
         }
     }
@@ -262,7 +287,7 @@ async fn broadcast_committee_announcement(party_id: u16) -> Result<(), Error> {
     Ok(())
 }
 
-/// Broadcasts auxiliary info completion status
+/// Broadcasts auxiliary-info completion status
 async fn broadcast_aux_info_ready(party_id: u16) -> Result<(), Error> {
     println!("Broadcasting auxiliary info completion for party {}", party_id);
 
@@ -286,7 +311,7 @@ async fn broadcast_aux_info_ready(party_id: u16) -> Result<(), Error> {
     Ok(())
 }
 
-/// Broadcasts key generation completion status
+/// Broadcasts key-generation completion status
 async fn broadcast_keygen_ready(party_id: u16) -> Result<(), Error> {
     println!("Broadcasting key generation completion for party {}", party_id);
 
@@ -389,22 +414,23 @@ struct SigningRequest {
     initiator: u16,
 }
 
-/// Handles an incoming signing request
-async fn handle_signing_request(
-    request: SigningRequest,
-    storage: &KeyStorage,
-) -> Result<(), Error> {
-    println!("Handling signing request from party {}", request.initiator);
-
-    // Load the key share
-    let _key_share = storage.load::<Vec<u8>>("incomplete_key_share")?;
-
-    // TODO: Implement actual signing request handling
-    Ok(())
-}
-
 /// Handles signing requests after initialization
 async fn handle_signing_requests(storage: &KeyStorage, _party_id: u16) -> Result<(), Error> {
+
+    /// Handles an incoming signing request
+    async fn handle_signing_request(
+        request: SigningRequest,
+        storage: &KeyStorage,
+    ) -> Result<(), Error> {
+        println!("Handling signing request from party {}", request.initiator);
+
+        // Load the key share
+        let _key_share = storage.load::<Vec<u8>>("incomplete_key_share")?;
+
+        // TODO: Implement actual signing request handling
+        Ok(())
+    }
+
     loop {
         if let Some(request) = await_signing_request().await? {
             handle_signing_request(request, storage).await?;

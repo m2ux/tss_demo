@@ -89,14 +89,36 @@ pub enum NetworkError {
     },
 }
 
-/// Tracks message ordering state to ensure proper message sequencing.
+//// Tracks message ordering state to ensure proper message sequencing.
+///
+/// The MessageState struct is responsible for maintaining and validating the order
+/// of messages in the network communication protocol. It uses wrapping arithmetic
+/// to handle message ID overflow gracefully when reaching u64::MAX.
+///
+/// # Examples
+///
+/// ```
+/// let mut state = MessageState::new();
+///
+/// // Validate a sequence of message IDs
+/// assert!(state.validate_and_update_id(1).is_ok());
+/// assert!(state.validate_and_update_id(2).is_ok());
+///
+/// // Out of order messages will return an error
+/// assert!(state.validate_and_update_id(1).is_err());
+/// ```
 #[derive(Debug)]
 struct MessageState {
+    /// The last successfully validated message ID, wrapped to handle overflow
     last_id: Wrapping<u64>,
 }
 
 impl MessageState {
     /// Creates a new MessageState starting from ID 0.
+    ///
+    /// # Returns
+    ///
+    /// Returns a new MessageState instance initialized with a message ID of 0.
     fn new() -> Self {
         Self {
             last_id: Wrapping(0),
@@ -105,8 +127,31 @@ impl MessageState {
 
     /// Validates that a message ID maintains monotonic ordering.
     ///
-    /// Returns an error if the new ID is less than the last seen ID,
-    /// accounting for wraparound at u64::MAX.
+    /// This function ensures messages are processed in order by validating that each
+    /// new message ID is greater than the last seen ID. It handles wraparound at
+    /// u64::MAX by using wrapping arithmetic.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The message ID to validate
+    ///
+    /// # Returns
+    ///
+    /// Returns Ok(()) if the message ID is valid and in sequence.
+    /// Returns Err(NetworkError::InvalidMessageId) if the message is out of sequence.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut state = MessageState::new();
+    ///
+    /// // Valid sequence
+    /// assert!(state.validate_and_update_id(1).is_ok());
+    /// assert!(state.validate_and_update_id(2).is_ok());
+    ///
+    /// // Invalid - out of sequence
+    /// assert!(state.validate_and_update_id(1).is_err());
+    /// ```
     fn validate_and_update_id(&mut self, id: u64) -> Result<(), NetworkError> {
         let current = self.last_id;
         let new_id = Wrapping(id);
@@ -174,16 +219,6 @@ pub struct WsReceiver<M> {
     _phantom: PhantomData<M>,
 }
 
-/// Combined WebSocket delivery mechanism implementing `round_based::Delivery`.
-///
-/// Provides the main interface for WebSocket-based network communication,
-/// combining both sending and receiving capabilities.
-pub struct WsDelivery<M> {
-    sender: WsSender<M>,
-    receiver: WsReceiver<M>,
-    server_addr: String,
-}
-
 /// Internal message format for wire transmission.
 ///
 /// Encapsulates all necessary metadata for message delivery and ordering.
@@ -212,6 +247,16 @@ impl WireMessage {
             MessageDestination::AllParties => None,
         })
     }
+}
+
+/// Combined WebSocket delivery mechanism implementing `round_based::Delivery`.
+///
+/// Provides the main interface for WebSocket-based network communication,
+/// combining both sending and receiving capabilities.
+pub struct WsDelivery<M> {
+    sender: WsSender<M>,
+    receiver: WsReceiver<M>,
+    server_addr: String,
 }
 
 impl<M> WsDelivery<M>
