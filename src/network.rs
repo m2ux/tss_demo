@@ -33,6 +33,7 @@ use futures::{Stream, Sink, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, WebSocketStream, MaybeTlsStream};
 use round_based::{Delivery, MessageDestination};
+use serde::{Deserialize,Serialize};
 use std::{marker::PhantomData, pin::Pin, sync::atomic::{AtomicU64, Ordering}, num::Wrapping};
 use futures::channel::mpsc;
 
@@ -130,6 +131,37 @@ pub struct WsSender<M> {
     sender: mpsc::UnboundedSender<Vec<u8>>,
     party_id: u16,
     _phantom: PhantomData<M>,
+}
+
+impl<M> WsSender<M>
+where
+    M: Serialize + for<'de> Deserialize<'de>
+{
+    /// Broadcasts a message to all connected parties
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The message to broadcast
+    ///
+    /// # Returns
+    ///
+    /// Returns Ok(()) on success, or NetworkError on failure
+    pub async fn broadcast(&self, message: Vec<u8>) -> Result<(), NetworkError> {
+        let wire_msg = WireMessage {
+            id: MESSAGE_ID_GEN.next_id(),
+            sender: self.party_id,
+            receiver: None,  // None indicates broadcast
+            payload: message,
+        };
+
+        let encoded = bincode::serialize(&wire_msg)
+            .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
+
+        self.sender.unbounded_send(encoded)
+            .map_err(|_| NetworkError::ChannelClosed)?;
+
+        Ok(())
+    }
 }
 
 /// WebSocket message receiver component.

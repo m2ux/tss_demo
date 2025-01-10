@@ -33,7 +33,7 @@ mod server;
 use clap::Parser;
 use error::Error;
 use futures::StreamExt;
-use network::{WsDelivery, NetworkError};
+use network::{WsDelivery, NetworkError, WsSender};
 use cggmp21::{
     supported_curves::Secp256k1,
     ExecutionId,
@@ -397,29 +397,137 @@ async fn generate_key_share(
 /// Broadcasts committee member announcement to the network
 async fn broadcast_committee_announcement(party_id: u16) -> Result<(), Error> {
     println!("Broadcasting presence as committee member {}", party_id);
-    // TODO: Implement actual announcement broadcasting
+
+    // Create the announcement message
+    let announcement = ProtocolMessage::CommitteeMemberAnnouncement { party_id };
+
+    // Serialize the announcement
+    let serialized = bincode::serialize(&announcement)
+        .map_err(Error::Serialization)?;
+
+    // Send the announcement to all connected peers
+    let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
+        "ws://localhost:8080",  // Use configured server address here
+        party_id
+    ).await?;
+
+    let (_receiver, sender) = delivery.split();
+    sender.broadcast(serialized).await
+        .map_err(Error::Network)?;
+
     Ok(())
 }
 
 /// Broadcasts auxiliary info completion status
 async fn broadcast_aux_info_ready(party_id: u16) -> Result<(), Error> {
     println!("Broadcasting auxiliary info completion for party {}", party_id);
-    // TODO: Implement actual broadcast
+
+    // Create the completion status message
+    let ready_msg = ProtocolMessage::AuxInfoReady { party_id };
+
+    // Serialize the message
+    let serialized = bincode::serialize(&ready_msg)
+        .map_err(Error::Serialization)?;
+
+    // Send the message to all connected peers
+    let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
+        "ws://localhost:8080",  // Use configured server address here
+        party_id
+    ).await?;
+
+    let (_receiver, sender) = delivery.split();
+    sender.broadcast(serialized).await
+        .map_err(Error::Network)?;
+
     Ok(())
 }
 
 /// Broadcasts key generation completion status
 async fn broadcast_keygen_ready(party_id: u16) -> Result<(), Error> {
     println!("Broadcasting key generation completion for party {}", party_id);
-    // TODO: Implement actual broadcast
+
+    // Create the completion status message
+    let ready_msg = ProtocolMessage::KeyGenReady { party_id };
+
+    // Serialize the message
+    let serialized = bincode::serialize(&ready_msg)
+        .map_err(Error::Serialization)?;
+
+    // Send the message to all connected peers
+    let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
+        "ws://localhost:8080",  // Use configured server address here
+        party_id
+    ).await?;
+
+    let (_receiver, sender) = delivery.split();
+    sender.broadcast(serialized).await
+        .map_err(Error::Network)?;
+
     Ok(())
 }
 
 /// Discovers currently available committee members
 async fn discover_committee_members() -> Result<HashSet<u16>, Error> {
     println!("Discovering available committee members...");
-    // TODO: Implement actual committee discovery
-    let committee = HashSet::new();
+
+    // Connect to the WebSocket server
+    let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
+        "ws://localhost:8080", // This should use the configured server address
+        0, // Use party ID 0 for discovery
+    ).await?;
+
+    // Split into receiver and sender
+    let (mut receiver, sender) = delivery.split();
+
+    // Create request for committee state
+    let request = ProtocolMessage::CommitteeMemberAnnouncement { party_id: 0 };
+
+    // Serialize and send request
+    let serialized = bincode::serialize(&request).map_err(Error::Serialization)?;
+    sender.broadcast(serialized).await.map_err(Error::Network)?;
+
+    // Initialize committee set
+    let mut committee = HashSet::new();
+
+    // Set a timeout for discovery
+    let timeout = tokio::time::sleep(std::time::Duration::from_secs(2));
+    tokio::pin!(timeout);
+
+    // Process responses until timeout
+    loop {
+        tokio::select! {
+            _ = &mut timeout => {
+                break;
+            }
+            Some(msg_result) = receiver.next() => {
+                match msg_result {
+                    Ok(incoming) => {
+                        // Try to deserialize as ProtocolMessage
+                        if let Ok(bytes) = bincode::serialize(&incoming.msg) {
+                            if let Ok(msg) = bincode::deserialize::<ProtocolMessage>(&bytes) {
+                                match msg {
+                                    ProtocolMessage::CommitteeMemberAnnouncement { party_id } => {
+                                        if party_id != 0 { // Don't include discovery party
+                                            committee.insert(party_id);
+                                        }
+                                    }
+                                    ProtocolMessage::CommitteeState { members, .. } => {
+                                        committee.extend(members.into_iter());
+                                    }
+                                    _ => {} // Ignore other message types
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("Error receiving response: {:?}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    println!("Found {} committee members", committee.len());
     Ok(committee)
 }
 
