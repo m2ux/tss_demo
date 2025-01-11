@@ -59,17 +59,28 @@ use cggmp21::{
 };
 use clap::Parser;
 use error::Error;
+use futures_util::{SinkExt, StreamExt};
 use network::WsDelivery;
 use protocol::run_committee_mode;
 use service::run_service_mode;
 use sha2::Sha256;
+use std::collections::HashMap;
+use std::sync::Arc;
 use storage::KeyStorage;
-use tokio::sync::oneshot;
+use tokio::net::TcpListener;
+use tokio::sync::RwLock;
+use tokio_tungstenite::accept_async;
 
-/// Internal state tracking for signing sessions
-struct SigningSession {
-    response_channel: oneshot::Sender<()>,
-    party_id: u16,
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Error::Config(err.to_string())
+    }
+}
+
+impl From<tungstenite::Error> for Error {
+    fn from(err: tungstenite::Error) -> Self {
+        Error::Config(err.to_string())
+    }
 }
 
 /// Operation modes for the application
@@ -79,6 +90,8 @@ enum OperationMode {
     Committee,
     /// Operate as a signing service
     Service(String),
+    /// Run as a WebSocket server
+    Server,
 }
 
 /// Command-line arguments
@@ -86,16 +99,20 @@ enum OperationMode {
 #[command(version, about, long_about = None)]
 struct Args {
     /// Run in committee mode, participating in the signing committee
-    #[arg(long, conflicts_with = "message")]
+    #[arg(long, conflicts_with_all = ["message", "server_mode"])]
     committee: bool,
 
     /// Message to be signed (initiates signing mode)
-    #[arg(short, long, conflicts_with = "committee")]
+    #[arg(short, long, conflicts_with_all = ["committee", "server_mode"])]
     message: Option<String>,
+
+    /// Run as WebSocket server
+    #[arg(long, conflicts_with_all = ["committee", "message", "party_id"])]
+    server_mode: bool,
 
     /// Local party ID for this instance
     #[arg(short, long)]
-    party_id: u16,
+    party_id: Option<u16>,
 
     /// WebSocket server address
     #[arg(short, long)]
@@ -109,30 +126,78 @@ async fn main() -> Result<(), Error> {
     let args = Args::parse();
 
     // Determine operation mode
-    let mode = if args.committee {
+    let mode = if args.server_mode {
+        OperationMode::Server
+    } else if args.committee {
         OperationMode::Committee
     } else if let Some(msg) = args.message.clone() {
         OperationMode::Service(msg)
     } else {
         return Err(Error::Config(
-            "Either --committee or --message must be specified".into(),
+            "Either --committee, --message, or --server-mode must be specified".into(),
         ));
     };
 
-    // Initialize storage
-    let storage = KeyStorage::new("keys", "a very secret key that should be properly secured")?;
-
-    // Initialize network connection
-    type Msg = ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>;
-    let delivery = WsDelivery::<Msg>::connect(&args.server, args.party_id).await?;
-
-    // Select operating mode
     match mode {
-        OperationMode::Committee => {
-            run_committee_mode(delivery, storage, args.party_id).await?;
+        OperationMode::Server => {
+            // Create a new TCP listener
+            let listener = TcpListener::bind(&args.server).await?;
+            println!("WebSocket server listening on {}", args.server);
+
+            // Shared state for connected clients
+            let clients = Arc::new(RwLock::new(HashMap::<
+                std::net::SocketAddr,
+                tokio::sync::mpsc::UnboundedSender<tungstenite::Message>,
+            >::new()));
+
+            // Accept incoming connections
+            while let Ok((stream, addr)) = listener.accept().await {
+                println!("New connection from: {}", addr);
+                let ws_stream = accept_async(stream).await?;
+                let client_clients = Arc::clone(&clients);
+
+                // Spawn a new task for each connection
+                tokio::spawn(async move {
+                    let (mut write, mut read) = ws_stream.split();
+
+                    // Handle messages from this client
+                    while let Some(Ok(msg)) = read.next().await {
+                        let clients = client_clients.read().await;
+                        // Broadcast message to all other clients
+                        for client_sink in clients.values() {
+                            let _ = client_sink.send(msg.clone());
+                        }
+                    }
+
+                    // Clean up disconnected client
+                    client_clients.write().await.remove(&addr);
+                    println!("Client disconnected: {}", addr);
+                });
+            }
         }
-        OperationMode::Service(message) => {
-            run_service_mode(delivery, storage, args.party_id, message).await?;
+        _ => {
+            let party_id = args.party_id.ok_or_else(|| {
+                Error::Config("Party ID is required for committee and service modes".into())
+            })?;
+
+            // Initialize storage
+            let storage =
+                KeyStorage::new("keys", "a very secret key that should be properly secured")?;
+
+            // Initialize network connection
+            type Msg = ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>;
+            let delivery = WsDelivery::<Msg>::connect(&args.server, party_id).await?;
+
+            // Select operating mode
+            match mode {
+                OperationMode::Committee => {
+                    run_committee_mode(delivery, storage, party_id).await?;
+                }
+                OperationMode::Service(message) => {
+                    run_service_mode(delivery, storage, party_id, message).await?;
+                }
+                OperationMode::Server => unreachable!(),
+            }
         }
     }
 

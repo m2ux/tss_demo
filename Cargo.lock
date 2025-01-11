@@ -1875,6 +1875,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "futures-util",
  "rand_core",
  "round-based",
  "serde",
@@ -1884,6 +1885,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "tungstenite",
  "uuid",
 ]
 
