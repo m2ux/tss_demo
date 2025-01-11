@@ -71,6 +71,7 @@ use protocol::run_committee_mode;
 use service::run_service_mode;
 use sha2::Sha256;
 use storage::KeyStorage;
+use tracing::info;
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
@@ -141,19 +142,7 @@ async fn main() -> Result<(), Error> {
 
     match mode {
         OperationMode::Server => {
-            println!("Starting WebSocket server on {}", args.server);
-
-            // Parse the server address
-            let addr = args
-                .server
-                .parse()
-                .map_err(|e| Error::Config(format!("Invalid server address: {}", e)))?;
-
-            // Create and run the WebSocket server
-            let server = server::WsServer::new(addr);
-
-            // Run the server (this blocks until shutdown)
-            server.run().await.map_err(|e| Error::Server(e.into()))?;
+            run_server_mode(&args.server).await?;
         }
         _ => {
             let party_id = args.party_id.ok_or_else(|| {
@@ -180,6 +169,31 @@ async fn main() -> Result<(), Error> {
             }
         }
     }
+
+    Ok(())
+}
+
+/// Runs the application in server mode, handling WebSocket connections
+async fn run_server_mode(server_addr: &str) -> Result<(), Error> {
+    // If the address starts with "ws://", remove it for TCP binding
+    let bind_addr = server_addr
+        .trim_start_matches("ws://")
+        .trim_start_matches("wss://");
+
+    println!("Starting WebSocket server on {}", bind_addr);
+
+    // Parse the server address
+    let addr = bind_addr
+        .parse()
+        .map_err(|e| Error::Config(format!("Invalid server address: {}", e)))?;
+
+    // Create and run the WebSocket server
+    let server = server::WsServer::new(addr);
+
+    println!("WebSocket server listening for connections...");
+
+    // Run the server (this blocks until shutdown)
+    server.run().await.map_err(|e| Error::Server(e))?;
 
     Ok(())
 }

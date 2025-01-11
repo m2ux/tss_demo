@@ -1,17 +1,20 @@
 use crate::error::Error;
 use crate::network;
 use crate::network::{NetworkError, WsDelivery};
+use crate::server::ServerMessage;
 use crate::storage::KeyStorage;
 use cggmp21::{
     key_refresh::AuxOnlyMsg, key_share::AuxInfo, keygen::ThresholdMsg,
     security_level::SecurityLevel128, supported_curves::Secp256k1, ExecutionId, PregeneratedPrimes,
 };
+use futures::SinkExt;
 use futures::StreamExt;
 use rand_core::OsRng;
 use round_based::{Delivery, MpcParty};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashSet;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 /// Represents the various stages of committee initialization and operation
 ///
@@ -123,6 +126,9 @@ pub async fn run_committee_mode(
     let server_addr = delivery.addr().to_string();
     let (mut receiver, _sender) = delivery.split();
 
+    // Register with the committee server first
+    register_with_committee(&server_addr, party_id).await?;
+
     // Initialize committee state
     let mut committee_members = HashSet::new();
     let mut aux_info_ready = HashSet::new();
@@ -133,7 +139,6 @@ pub async fn run_committee_mode(
     // Announce presence
     broadcast_committee_announcement(party_id).await?;
     committee_members.insert(party_id);
-    println!("Committee members present: {}", committee_members.len());
 
     // Committee initialization phase
     loop {
@@ -143,6 +148,10 @@ pub async fn run_committee_mode(
                     println!("All committee members present. Establishing execution ID.");
                     state = CommitteeState::EstablishingExecutionId;
                 }
+                /*else {
+                    broadcast_committee_announcement(party_id).await?;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                }*/
             }
             CommitteeState::EstablishingExecutionId => {
                 // Lowest party ID proposes the execution ID
@@ -724,4 +733,30 @@ fn generate_unique_execution_id() -> String {
         chrono::Utc::now().timestamp(),
         uuid::Uuid::new_v4()
     )
+}
+
+/// Registers this party with the committee server
+async fn register_with_committee(server_addr: &str, party_id: u16) -> Result<(), Error> {
+    println!("Registering with committee server as party {}", party_id);
+
+    // Create a registration-specific connection
+    let (ws_stream, _) = connect_async(server_addr)
+        .await
+        .map_err(|e| Error::Network(NetworkError::WebSocket(e)))?;
+
+    let (mut write, _read) = ws_stream.split();
+
+    // Create registration message
+    let reg_msg = ServerMessage::Register { party_id };
+    let serialized = bincode::serialize(&reg_msg).map_err(Error::Serialization)?;
+
+    // Send registration message
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    write
+        .send(Message::Binary(serialized))
+        .await
+        .map_err(|e| Error::Network(NetworkError::WebSocket(e)))?;
+
+    println!("Successfully registered with committee server");
+    Ok(())
 }

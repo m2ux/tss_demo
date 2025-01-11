@@ -29,8 +29,9 @@
 //! }
 //! ```
 
+use crate::server::ServerMessage;
 use futures::channel::mpsc;
-use futures::{stream::SplitStream, Sink, SinkExt, Stream, StreamExt};
+use futures::{stream::SplitStream, Sink, Stream, StreamExt};
 use round_based::{Delivery, MessageDestination};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -289,15 +290,7 @@ where
             .await
             .map_err(NetworkError::WebSocket)?;
 
-        let (mut write, read) = ws_stream.split();
-
-        // Send registration message
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        let reg_msg = party_id.to_string();
-        write
-            .send(Message::Binary(reg_msg.into_bytes()))
-            .await
-            .map_err(NetworkError::WebSocket)?;
+        let (_write, read) = ws_stream.split();
 
         let (tx, rx) = mpsc::unbounded();
 
@@ -322,6 +315,22 @@ where
     /// Returns the server address this delivery instance is connected to
     pub fn addr(&self) -> &str {
         &self.server_addr
+    }
+
+    /// Unregisters this party from the committee server
+    pub async fn unregister(&self) -> Result<(), NetworkError> {
+        let unreg_msg = ServerMessage::Unregister {
+            party_id: self.sender.party_id,
+        };
+        let serialized = bincode::serialize(&unreg_msg)
+            .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
+
+        self.sender
+            .sender
+            .unbounded_send(serialized)
+            .map_err(|_| NetworkError::ChannelClosed)?;
+
+        Ok(())
     }
 }
 
@@ -421,8 +430,13 @@ where
         let encoded = bincode::serialize(&wire_msg)
             .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
 
+        // Wrap in ServerMessage::Protocol
+        let server_msg = ServerMessage::Protocol(encoded);
+        let final_encoded = bincode::serialize(&server_msg)
+            .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
+
         self.sender
-            .unbounded_send(encoded)
+            .unbounded_send(final_encoded)
             .map_err(|_| NetworkError::ChannelClosed)
     }
 
@@ -524,41 +538,58 @@ where
 
         match poll_result {
             std::task::Poll::Ready(Some(data)) => {
-                let wire_msg: WireMessage = match bincode::deserialize(&data) {
+                // Deserialize ServerMessage first
+                let server_msg: ServerMessage = match bincode::deserialize(&data) {
                     Ok(msg) => msg,
                     Err(_) => {
                         return std::task::Poll::Ready(Some(Err(NetworkError::Connection(
-                            "Deserialization failed".into(),
+                            "Failed to deserialize server message".into(),
                         ))))
                     }
                 };
 
-                // Validate message ID
-                if let Err(e) = message_state.validate_and_update_id(wire_msg.id) {
-                    return std::task::Poll::Ready(Some(Err(e)));
+                // Handle protocol message
+                if let ServerMessage::Protocol(protocol_data) = server_msg {
+                    let wire_msg: WireMessage = match bincode::deserialize(&protocol_data) {
+                        Ok(msg) => msg,
+                        Err(_) => {
+                            return std::task::Poll::Ready(Some(Err(NetworkError::Connection(
+                                "Failed to deserialize wire message".into(),
+                            ))))
+                        }
+                    };
+
+                    // Validate message ID
+                    if let Err(e) = message_state.validate_and_update_id(wire_msg.id) {
+                        return std::task::Poll::Ready(Some(Err(e)));
+                    }
+
+                    // Deserialize protocol message
+                    let message = match bincode::deserialize(&wire_msg.payload) {
+                        Ok(msg) => msg,
+                        Err(_) => {
+                            return std::task::Poll::Ready(Some(Err(NetworkError::Connection(
+                                "Failed to deserialize protocol message".into(),
+                            ))))
+                        }
+                    };
+
+                    let msg_type = wire_msg
+                        .to_message_destination()
+                        .map_or(round_based::MessageType::Broadcast, |_| {
+                            round_based::MessageType::P2P
+                        });
+
+                    std::task::Poll::Ready(Some(Ok(round_based::Incoming {
+                        id: wire_msg.id,
+                        sender: wire_msg.sender,
+                        msg: message,
+                        msg_type,
+                    })))
+                } else {
+                    // Ignore non-protocol messages
+                    std::task::Poll::Pending
                 }
-
-                let message = match bincode::deserialize(&wire_msg.payload) {
-                    Ok(msg) => msg,
-                    Err(_) => {
-                        return std::task::Poll::Ready(Some(Err(NetworkError::Connection(
-                            "Deserialization failed".into(),
-                        ))))
-                    }
-                };
-
-                let msg_type = wire_msg
-                    .to_message_destination()
-                    .map_or(round_based::MessageType::Broadcast, |_| {
-                        round_based::MessageType::P2P
-                    });
-
-                std::task::Poll::Ready(Some(Ok(round_based::Incoming {
-                    id: wire_msg.id,
-                    sender: wire_msg.sender,
-                    msg: message,
-                    msg_type,
-                })))
             }
             std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
             std::task::Poll::Pending => std::task::Poll::Pending,
