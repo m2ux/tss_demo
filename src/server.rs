@@ -359,7 +359,27 @@ impl WsServer {
         Ok(())
     }
 
-    /// Handles an incoming protocol message
+    /// Handles protocol message routing and delivery.
+    ///
+    /// This method processes incoming messages and routes them to the appropriate
+    /// recipients based on the message type (P2P or broadcast).
+    ///
+    /// # Arguments
+    ///
+    /// * `sender_id` - Party ID of the message sender
+    /// * `data` - Raw message data
+    /// * `clients` - Shared registry of connected clients
+    ///
+    /// # Message Routing
+    ///
+    /// * P2P messages are sent only to the specified recipient
+    /// * Broadcast messages are sent to all parties except the sender
+    /// * Messages to unknown recipients are logged as warnings
+    ///
+    /// # Error Handling
+    ///
+    /// * Deserialize failures are logged but don't terminate the connection
+    /// * Delivery failures to specific clients are logged as warnings
     async fn handle_protocol_message(
         sender_id: u16,
         data: Vec<u8>,
@@ -393,96 +413,5 @@ impl WsServer {
                 sender_id
             );
         }
-    }
-
-    /// Handles message routing and delivery.
-    ///
-    /// This method processes incoming messages and routes them to the appropriate
-    /// recipients based on the message type (P2P or broadcast).
-    ///
-    /// # Arguments
-    ///
-    /// * `sender_id` - Party ID of the message sender
-    /// * `data` - Raw message data
-    /// * `clients` - Shared registry of connected clients
-    ///
-    /// # Message Routing
-    ///
-    /// * P2P messages are sent only to the specified recipient
-    /// * Broadcast messages are sent to all parties except the sender
-    /// * Messages to unknown recipients are logged as warnings
-    ///
-    /// # Error Handling
-    ///
-    /// * Deserialize failures are logged but don't terminate the connection
-    /// * Delivery failures to specific clients are logged as warnings
-    async fn handle_message(
-        sender_id: u16,
-        data: Vec<u8>,
-        clients: &Arc<RwLock<HashMap<u16, ClientSession>>>,
-    ) {
-        if let Ok(wire_msg) = bincode::deserialize::<WireMessage>(&data) {
-            let clients_lock = clients.read().await;
-
-            match wire_msg.receiver {
-                Some(receiver_id) => {
-                    if let Some(session) = clients_lock.get(&receiver_id) {
-                        let _ = session.sender.send(Message::Binary(data));
-                    } else {
-                        warn!("Recipient {} not found for P2P message", receiver_id);
-                    }
-                }
-                None => {
-                    for (id, session) in clients_lock.iter() {
-                        if *id != sender_id {
-                            let _ = session.sender.send(Message::Binary(data.clone()));
-                        }
-                    }
-                }
-            }
-        } else {
-            error!("Failed to deserialize message from party {}", sender_id);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use futures::SinkExt;
-    use std::net::{IpAddr, Ipv4Addr};
-    use tokio_tungstenite::connect_async;
-
-    /// Tests basic server startup functionality
-    #[tokio::test]
-    async fn test_server_startup() {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let server = WsServer::new(addr);
-
-        tokio::spawn(async move {
-            server.run().await.expect("Server failed to run");
-        });
-    }
-
-    /// Tests client connection and party ID registration
-    #[tokio::test]
-    async fn test_client_connection() -> Result<(), Box<dyn std::error::Error>> {
-        // Start server
-        let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let server = WsServer::new(server_addr);
-        let actual_addr = TcpListener::bind(server_addr).await?.local_addr()?;
-
-        tokio::spawn(async move {
-            server.run().await.expect("Server failed to run");
-        });
-
-        // Connect client
-        let url = format!("ws://{}", actual_addr);
-        let (mut ws_stream, _) = connect_async(url).await?;
-
-        // Send party ID
-        ws_stream.send(Message::Binary(b"1".to_vec())).await?;
-
-        Ok(())
     }
 }

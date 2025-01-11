@@ -9,11 +9,14 @@ use cggmp21::{
 };
 use futures::SinkExt;
 use futures::StreamExt;
+use futures::Stream;
+use futures::TryStream;
 use rand_core::OsRng;
 use round_based::{Delivery, MpcParty};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashSet;
+use std::pin::Pin;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 /// Represents the various stages of committee initialization and operation
@@ -137,7 +140,7 @@ pub async fn run_committee_mode(
     let mut state = CommitteeState::AwaitingMembers;
 
     // Announce presence
-    broadcast_committee_announcement(party_id).await?;
+    //broadcast_committee_announcement(party_id).await?;
     committee_members.insert(party_id);
 
     // Committee initialization phase
@@ -148,10 +151,10 @@ pub async fn run_committee_mode(
                     println!("All committee members present. Establishing execution ID.");
                     state = CommitteeState::EstablishingExecutionId;
                 }
-                /*else {
+                else {
                     broadcast_committee_announcement(party_id).await?;
                     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                }*/
+                }
             }
             CommitteeState::EstablishingExecutionId => {
                 // Lowest party ID proposes the execution ID
@@ -256,42 +259,53 @@ pub async fn run_committee_mode(
         }
 
         // Process incoming messages
-        match receive_network_message(&mut receiver).await? {
-            NetworkMessage::Control(msg) => match msg {
-                ProtocolMessage::CommitteeMemberAnnouncement { party_id: pid } => {
-                    committee_members.insert(pid);
-                    println!("New committee member: {}", pid);
-                }
-                ProtocolMessage::ExecutionIdProposal {
-                    party_id: pid,
-                    execution_id,
-                } => {
-                    if state == CommitteeState::EstablishingExecutionId {
-                        execution_id_coord.propose(pid, execution_id.clone());
-                        // Accept if we haven't proposed our own
-                        if pid < party_id {
-                            broadcast_execution_id_accept(party_id, execution_id).await?;
+        match try_receive_network_message(&mut receiver) {
+            Ok(Some(msg)) => {
+                match msg {
+                    NetworkMessage::Control(msg) => match msg {
+                        ProtocolMessage::CommitteeMemberAnnouncement { party_id: pid } => {
+                            committee_members.insert(pid);
+                            println!("New committee member: {}", pid);
                         }
+                        ProtocolMessage::ExecutionIdProposal {
+                            party_id: pid,
+                            execution_id,
+                        } => {
+                            if state == CommitteeState::EstablishingExecutionId {
+                                execution_id_coord.propose(pid, execution_id.clone());
+                                // Accept if we haven't proposed our own
+                                if pid < party_id {
+                                    broadcast_execution_id_accept(party_id, execution_id).await?;
+                                }
+                            }
+                        }
+                        ProtocolMessage::ExecutionIdAccept {
+                            party_id: pid,
+                            execution_id,
+                        } => {
+                            if state == CommitteeState::EstablishingExecutionId {
+                                execution_id_coord.accept(pid, &execution_id);
+                            }
+                        }
+                        ProtocolMessage::AuxInfoReady { party_id: pid } => {
+                            aux_info_ready.insert(pid);
+                        }
+                        ProtocolMessage::KeyGenReady { party_id: pid } => {
+                            keygen_ready.insert(pid);
+                        }
+                        _ => {}
+                    },
+                    NetworkMessage::Protocol(_) => {
+                        // Handle protocol-specific messages (TBD)
                     }
                 }
-                ProtocolMessage::ExecutionIdAccept {
-                    party_id: pid,
-                    execution_id,
-                } => {
-                    if state == CommitteeState::EstablishingExecutionId {
-                        execution_id_coord.accept(pid, &execution_id);
-                    }
-                }
-                ProtocolMessage::AuxInfoReady { party_id: pid } => {
-                    aux_info_ready.insert(pid);
-                }
-                ProtocolMessage::KeyGenReady { party_id: pid } => {
-                    keygen_ready.insert(pid);
-                }
-                _ => {}
-            },
-            NetworkMessage::Protocol(_) => {
-                // Handle protocol-specific messages (TBD)
+            }
+            Ok(None) => {
+                // No message available, add a small delay before next check
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+            Err(e) => {
+                eprintln!("Error receiving message: {}", e);
             }
         }
     }
@@ -596,6 +610,46 @@ where
     }
 }
 
+/// Receives and processes incoming network messages without blocking
+fn try_receive_network_message<M>(
+    receiver: &mut network::WsReceiver<M>,
+) -> Result<Option<NetworkMessage<M>>, Error>
+where
+    M: serde::Serialize + for<'de> serde::Deserialize<'de>  + Unpin,
+{
+    // Create polling context
+    let waker = futures::task::noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+
+    match Pin::new(receiver).try_poll_next(&mut cx) {
+        std::task::Poll::Ready(Some(msg)) => {
+            match msg {
+                Ok(incoming) => {
+                    // First try to serialize the incoming message
+                    match bincode::serialize(&incoming.msg) {
+                        Ok(bytes) => {
+                            // Then try to deserialize as ProtocolMessage
+                            if let Ok(control_msg) = bincode::deserialize::<ProtocolMessage>(&bytes) {
+                                Ok(Some(NetworkMessage::Control(control_msg)))
+                            } else {
+                                // If not a control message, it must be a protocol message
+                                Ok(Some(NetworkMessage::Protocol(incoming)))
+                            }
+                        },
+                        Err(_) => {
+                            // If serialization fails, assume it's a protocol message
+                            Ok(Some(NetworkMessage::Protocol(incoming)))
+                        }
+                    }
+                },
+                Err(e) => Err(Error::Network(e)),
+            }
+        },
+        std::task::Poll::Ready(None) => Ok(None),  // Stream ended
+        std::task::Poll::Pending => Ok(None),  // No message available
+    }
+}
+
 /// Structure representing a signing request
 #[derive(Debug)]
 pub struct SigningRequest {
@@ -751,12 +805,10 @@ async fn register_with_committee(server_addr: &str, party_id: u16) -> Result<(),
     let serialized = bincode::serialize(&reg_msg).map_err(Error::Serialization)?;
 
     // Send registration message
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     write
         .send(Message::Binary(serialized))
         .await
         .map_err(|e| Error::Network(NetworkError::WebSocket(e)))?;
-
-    println!("Successfully registered with committee server");
+    
     Ok(())
 }
