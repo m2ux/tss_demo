@@ -19,6 +19,7 @@
 //! * Secure WebSocket communication with reliable broadcast
 //! * Encrypted persistent storage of key shares
 //! * Automatic quorum formation for signing operations
+//! * WebSocket server functionality for message relaying
 //!
 //! # Security Properties
 //!
@@ -37,6 +38,11 @@
 //! Initiate signing operation:
 //! ```bash
 //! cggmp21-demo --message "Message to sign" --party-id 2 --server "ws://localhost:8080"
+//! ```
+//!
+//! Run as a WebSocket server:
+//! ```bash
+//! cggmp21-demo --server-mode --server "localhost:8080"
 //! ```
 //!
 //! # Protocol Parameters
@@ -158,7 +164,7 @@ async fn main() -> Result<(), Error> {
 
                 // Spawn a new task for each connection
                 tokio::spawn(async move {
-                    let (mut write, mut read) = ws_stream.split();
+                    let (mut _write, mut read) = ws_stream.split();
 
                     // Handle messages from this client
                     while let Some(Ok(msg)) = read.next().await {
