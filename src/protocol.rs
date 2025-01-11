@@ -1,6 +1,6 @@
 use crate::error::Error;
 use crate::network;
-use crate::network::{NetworkError, WsDelivery};
+use crate::network::{NetworkError, WsDelivery, WsSender};
 use crate::server::ServerMessage;
 use crate::storage::KeyStorage;
 use cggmp21::{
@@ -8,8 +8,8 @@ use cggmp21::{
     security_level::SecurityLevel128, supported_curves::Secp256k1, ExecutionId, PregeneratedPrimes,
 };
 use futures::SinkExt;
-use futures::StreamExt;
 use futures::Stream;
+use futures::StreamExt;
 use futures::TryStream;
 use rand_core::OsRng;
 use round_based::{Delivery, MpcParty};
@@ -127,10 +127,7 @@ pub async fn run_committee_mode(
     println!("Starting in committee mode with party ID: {}", party_id);
 
     let server_addr = delivery.addr().to_string();
-    let (mut receiver, _sender) = delivery.split();
-
-    // Register with the committee server first
-    register_with_committee(&server_addr, party_id).await?;
+    let (mut receiver, sender) = delivery.split();
 
     // Initialize committee state
     let mut committee_members = HashSet::new();
@@ -139,8 +136,6 @@ pub async fn run_committee_mode(
     let mut execution_id_coord = ExecutionIdCoordination::new();
     let mut state = CommitteeState::AwaitingMembers;
 
-    // Announce presence
-    //broadcast_committee_announcement(party_id).await?;
     committee_members.insert(party_id);
 
     // Committee initialization phase
@@ -150,9 +145,8 @@ pub async fn run_committee_mode(
                 if committee_members.len() >= 5 {
                     println!("All committee members present. Establishing execution ID.");
                     state = CommitteeState::EstablishingExecutionId;
-                }
-                else {
-                    broadcast_committee_announcement(party_id).await?;
+                } else {
+                    broadcast_committee_announcement(sender.clone(), party_id).await?;
                     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
                 }
             }
@@ -161,7 +155,7 @@ pub async fn run_committee_mode(
                 if party_id == *committee_members.iter().min().unwrap() {
                     let proposed_id = generate_unique_execution_id();
                     execution_id_coord.propose(party_id, proposed_id.clone());
-                    broadcast_execution_id_proposal(party_id, proposed_id).await?;
+                    broadcast_execution_id_proposal(sender.clone(), party_id, proposed_id).await?;
                     state = CommitteeState::AwaitingExecutionId;
                 }
                 // Non-proposing parties wait in this state until they receive a proposal
@@ -174,7 +168,12 @@ pub async fn run_committee_mode(
                             // Accept if proposer has lowest ID
                             if proposer_id == *committee_members.iter().min().unwrap() {
                                 execution_id_coord.propose(proposer_id, execution_id.clone());
-                                broadcast_execution_id_accept(party_id, execution_id).await?;
+                                broadcast_execution_id_accept(
+                                    sender.clone(),
+                                    party_id,
+                                    execution_id,
+                                )
+                                .await?;
                                 state = CommitteeState::AwaitingExecutionId;
                             } else {
                                 println!(
@@ -212,7 +211,7 @@ pub async fn run_committee_mode(
                 .await?;
                 storage.save("aux_info", &aux_info)?;
 
-                broadcast_aux_info_ready(party_id).await?;
+                broadcast_aux_info_ready(sender.clone(), party_id).await?;
                 aux_info_ready.insert(party_id);
                 state = CommitteeState::AwaitingAuxInfo;
             }
@@ -235,7 +234,7 @@ pub async fn run_committee_mode(
                 .await?;
                 storage.save("key_share", &key_share)?;
 
-                broadcast_keygen_ready(party_id).await?;
+                broadcast_keygen_ready(sender.clone(), party_id).await?;
                 keygen_ready.insert(party_id);
                 state = CommitteeState::AwaitingKeyGen;
             }
@@ -275,7 +274,12 @@ pub async fn run_committee_mode(
                                 execution_id_coord.propose(pid, execution_id.clone());
                                 // Accept if we haven't proposed our own
                                 if pid < party_id {
-                                    broadcast_execution_id_accept(party_id, execution_id).await?;
+                                    broadcast_execution_id_accept(
+                                        sender.clone(),
+                                        party_id,
+                                        execution_id,
+                                    )
+                                    .await?;
                                 }
                             }
                         }
@@ -368,128 +372,100 @@ async fn generate_key_share(
 }
 
 /// Broadcasts committee member announcement to the network
-async fn broadcast_committee_announcement(party_id: u16) -> Result<(), Error> {
+async fn broadcast_committee_announcement(
+    sender: WsSender<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>,
+    party_id: u16,
+) -> Result<(), Error> {
     println!("Broadcasting presence as committee member {}", party_id);
 
-    // Create the announcement message
-    let announcement = ProtocolMessage::CommitteeMemberAnnouncement { party_id };
-
-    // Serialize the announcement
-    let serialized = bincode::serialize(&announcement).map_err(Error::Serialization)?;
-
-    // Send the announcement to all connected peers
-    let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
-        "ws://localhost:8080", // Use configured server address here
-        party_id,
-    )
-    .await?;
-
-    let (_receiver, sender) = delivery.split();
-    sender.broadcast(serialized).await.map_err(Error::Network)?;
+    sender
+        .broadcast(
+            bincode::serialize(&ProtocolMessage::CommitteeMemberAnnouncement { party_id })
+                .map_err(Error::Serialization)?,
+        )
+        .await
+        .map_err(Error::Network)?;
 
     Ok(())
 }
 
 /// Broadcasts auxiliary-info completion status
-async fn broadcast_aux_info_ready(party_id: u16) -> Result<(), Error> {
+async fn broadcast_aux_info_ready(
+    sender: WsSender<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>,
+    party_id: u16,
+) -> Result<(), Error> {
     println!(
         "Broadcasting auxiliary info completion for party {}",
         party_id
     );
-
-    // Create the completion status message
-    let ready_msg = ProtocolMessage::AuxInfoReady { party_id };
-
-    // Serialize the message
-    let serialized = bincode::serialize(&ready_msg).map_err(Error::Serialization)?;
-
-    // Send the message to all connected peers
-    let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
-        "ws://localhost:8080", // Use configured server address here
-        party_id,
-    )
-    .await?;
-
-    let (_receiver, sender) = delivery.split();
-    sender.broadcast(serialized).await.map_err(Error::Network)?;
+    sender
+        .broadcast(
+            bincode::serialize(&ProtocolMessage::AuxInfoReady { party_id })
+                .map_err(Error::Serialization)?,
+        )
+        .await
+        .map_err(Error::Network)?;
 
     Ok(())
 }
 
 /// Broadcasts key-generation completion status
-async fn broadcast_keygen_ready(party_id: u16) -> Result<(), Error> {
+async fn broadcast_keygen_ready(
+    sender: WsSender<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>,
+    party_id: u16,
+) -> Result<(), Error> {
     println!(
         "Broadcasting key generation completion for party {}",
         party_id
     );
 
-    // Create the completion status message
-    let ready_msg = ProtocolMessage::KeyGenReady { party_id };
-
-    // Serialize the message
-    let serialized = bincode::serialize(&ready_msg).map_err(Error::Serialization)?;
-
-    // Send the message to all connected peers
-    let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
-        "ws://localhost:8080", // Use configured server address here
-        party_id,
-    )
-    .await?;
-
-    let (_receiver, sender) = delivery.split();
-    sender.broadcast(serialized).await.map_err(Error::Network)?;
+    sender
+        .broadcast(
+            bincode::serialize(&ProtocolMessage::KeyGenReady { party_id })
+                .map_err(Error::Serialization)?,
+        )
+        .await
+        .map_err(Error::Network)?;
 
     Ok(())
 }
 
 /// Broadcast an execution ID proposal
-async fn broadcast_execution_id_proposal(party_id: u16, execution_id: String) -> Result<(), Error> {
+async fn broadcast_execution_id_proposal(
+    sender: WsSender<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>,
+    party_id: u16,
+    execution_id: String,
+) -> Result<(), Error> {
     let proposal = ProtocolMessage::ExecutionIdProposal {
         party_id,
         execution_id,
     };
 
-    // Serialize the proposal message
-    let serialized = bincode::serialize(&proposal).map_err(Error::Serialization)?;
-
-    // Create new delivery instance
-    let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
-        "ws://localhost:8080",
-        party_id,
-    )
-    .await?;
-
-    // Split into receiver and sender
-    let (_receiver, sender) = delivery.split();
-
     // Broadcast the serialized message
-    sender.broadcast(serialized).await.map_err(Error::Network)?;
+    sender
+        .broadcast(bincode::serialize(&proposal).map_err(Error::Serialization)?)
+        .await
+        .map_err(Error::Network)?;
 
     Ok(())
 }
 
 /// Broadcast acceptance of an execution ID
-async fn broadcast_execution_id_accept(party_id: u16, execution_id: String) -> Result<(), Error> {
+async fn broadcast_execution_id_accept(
+    sender: WsSender<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>,
+    party_id: u16,
+    execution_id: String,
+) -> Result<(), Error> {
     let accept = ProtocolMessage::ExecutionIdAccept {
         party_id,
         execution_id,
     };
 
-    // Serialize the accept message
-    let serialized = bincode::serialize(&accept).map_err(Error::Serialization)?;
-
-    // Create new delivery instance
-    let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
-        "ws://localhost:8080",
-        party_id,
-    )
-    .await?;
-
-    // Split into receiver and sender
-    let (_receiver, sender) = delivery.split();
-
     // Broadcast the serialized message
-    sender.broadcast(serialized).await.map_err(Error::Network)?;
+    sender
+        .broadcast(bincode::serialize(&accept).map_err(Error::Serialization)?)
+        .await
+        .map_err(Error::Network)?;
 
     Ok(())
 }
@@ -615,7 +591,7 @@ fn try_receive_network_message<M>(
     receiver: &mut network::WsReceiver<M>,
 ) -> Result<Option<NetworkMessage<M>>, Error>
 where
-    M: serde::Serialize + for<'de> serde::Deserialize<'de>  + Unpin,
+    M: serde::Serialize + for<'de> serde::Deserialize<'de> + Unpin,
 {
     // Create polling context
     let waker = futures::task::noop_waker();
@@ -629,24 +605,25 @@ where
                     match bincode::serialize(&incoming.msg) {
                         Ok(bytes) => {
                             // Then try to deserialize as ProtocolMessage
-                            if let Ok(control_msg) = bincode::deserialize::<ProtocolMessage>(&bytes) {
+                            if let Ok(control_msg) = bincode::deserialize::<ProtocolMessage>(&bytes)
+                            {
                                 Ok(Some(NetworkMessage::Control(control_msg)))
                             } else {
                                 // If not a control message, it must be a protocol message
                                 Ok(Some(NetworkMessage::Protocol(incoming)))
                             }
-                        },
+                        }
                         Err(_) => {
                             // If serialization fails, assume it's a protocol message
                             Ok(Some(NetworkMessage::Protocol(incoming)))
                         }
                     }
-                },
+                }
                 Err(e) => Err(Error::Network(e)),
             }
-        },
-        std::task::Poll::Ready(None) => Ok(None),  // Stream ended
-        std::task::Poll::Pending => Ok(None),  // No message available
+        }
+        std::task::Poll::Ready(None) => Ok(None), // Stream ended
+        std::task::Poll::Pending => Ok(None),     // No message available
     }
 }
 
@@ -787,28 +764,4 @@ fn generate_unique_execution_id() -> String {
         chrono::Utc::now().timestamp(),
         uuid::Uuid::new_v4()
     )
-}
-
-/// Registers this party with the committee server
-async fn register_with_committee(server_addr: &str, party_id: u16) -> Result<(), Error> {
-    println!("Registering with committee server as party {}", party_id);
-
-    // Create a registration-specific connection
-    let (ws_stream, _) = connect_async(server_addr)
-        .await
-        .map_err(|e| Error::Network(NetworkError::WebSocket(e)))?;
-
-    let (mut write, _read) = ws_stream.split();
-
-    // Create registration message
-    let reg_msg = ServerMessage::Register { party_id };
-    let serialized = bincode::serialize(&reg_msg).map_err(Error::Serialization)?;
-
-    // Send registration message
-    write
-        .send(Message::Binary(serialized))
-        .await
-        .map_err(|e| Error::Network(NetworkError::WebSocket(e)))?;
-    
-    Ok(())
 }

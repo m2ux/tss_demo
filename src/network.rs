@@ -183,6 +183,7 @@ impl MessageState {
 ///
 /// Handles sending messages to other parties through the WebSocket connection.
 /// Implements the `Sink` trait for outgoing messages.
+#[derive(Clone)]
 pub struct WsSender<M> {
     sender: mpsc::UnboundedSender<Vec<u8>>,
     party_id: u16,
@@ -317,7 +318,23 @@ where
         &self.server_addr
     }
 
-    /// Unregisters this party from the committee server
+    /// Registers this party with the ws server
+    pub async fn register(&self) -> Result<(), NetworkError> {
+        let reg_msg = ServerMessage::Register {
+            party_id: self.sender.party_id,
+        };
+        let serialized = bincode::serialize(&reg_msg)
+            .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
+
+        self.sender
+            .sender
+            .unbounded_send(serialized)
+            .map_err(|_| NetworkError::ChannelClosed)?;
+
+        Ok(())
+    }
+
+    /// Unregisters this party from the ws server
     pub async fn unregister(&self) -> Result<(), NetworkError> {
         let unreg_msg = ServerMessage::Unregister {
             party_id: self.sender.party_id,
