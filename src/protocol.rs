@@ -133,6 +133,7 @@ pub async fn run_committee_mode(
     // Announce presence
     broadcast_committee_announcement(party_id).await?;
     committee_members.insert(party_id);
+    println!("Committee members present: {}", committee_members.len());
 
     // Committee initialization phase
     loop {
@@ -250,6 +251,7 @@ pub async fn run_committee_mode(
             NetworkMessage::Control(msg) => match msg {
                 ProtocolMessage::CommitteeMemberAnnouncement { party_id: pid } => {
                     committee_members.insert(pid);
+                    println!("New committee member: {}", pid);
                 }
                 ProtocolMessage::ExecutionIdProposal {
                     party_id: pid,

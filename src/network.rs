@@ -30,7 +30,7 @@
 //! ```
 
 use futures::channel::mpsc;
-use futures::{Sink, Stream, StreamExt};
+use futures::{stream::SplitStream, Sink, SinkExt, Stream, StreamExt};
 use round_based::{Delivery, MessageDestination};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -41,6 +41,7 @@ use std::{
 };
 use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tungstenite::Message;
 
 /// Thread-safe message ID generator with overflow handling.
 ///
@@ -70,6 +71,13 @@ impl MessageIdGenerator {
 }
 
 static MESSAGE_ID_GEN: MessageIdGenerator = MessageIdGenerator::new();
+
+/// Message sent by client to register with server
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ClientRegistration {
+    /// Initial registration message with party ID
+    Register { party_id: u16 },
+}
 
 /// Errors that can occur during network operations.
 #[derive(Debug, thiserror::Error)]
@@ -264,7 +272,7 @@ pub struct WsDelivery<M> {
 
 impl<M> WsDelivery<M>
 where
-    M: serde::Serialize + for<'de> serde::Deserialize<'de>,
+    M: Serialize + for<'de> Deserialize<'de>,
 {
     /// Establishes a new WebSocket connection to the specified server.
     ///
@@ -281,9 +289,20 @@ where
             .await
             .map_err(NetworkError::WebSocket)?;
 
+        let (mut write, read) = ws_stream.split();
+
+        // Send registration message
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        let reg_msg = party_id.to_string();
+        write
+            .send(Message::Binary(reg_msg.into_bytes()))
+            .await
+            .map_err(NetworkError::WebSocket)?;
+
         let (tx, rx) = mpsc::unbounded();
 
-        tokio::spawn(handle_websocket(ws_stream, tx.clone()));
+        // Spawn task to handle incoming messages
+        tokio::spawn(handle_websocket_read(read, tx.clone()));
 
         Ok(Self {
             sender: WsSender {
@@ -306,16 +325,13 @@ where
     }
 }
 
-/// Handles the WebSocket connection lifecycle.
-///
-/// Spawned as a separate task to manage the WebSocket connection and forward
-/// received messages to the internal channel.
-async fn handle_websocket(
-    mut ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+/// Handles the WebSocket read stream
+async fn handle_websocket_read(
+    mut read: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     tx: mpsc::UnboundedSender<Vec<u8>>,
 ) {
-    while let Some(msg) = ws_stream.next().await {
-        if let Ok(tokio_tungstenite::tungstenite::Message::Binary(data)) = msg {
+    while let Some(msg) = read.next().await {
+        if let Ok(Message::Binary(data)) = msg {
             let _ = tx.unbounded_send(data);
         }
     }

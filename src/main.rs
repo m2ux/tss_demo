@@ -70,12 +70,7 @@ use network::WsDelivery;
 use protocol::run_committee_mode;
 use service::run_service_mode;
 use sha2::Sha256;
-use std::collections::HashMap;
-use std::sync::Arc;
 use storage::KeyStorage;
-use tokio::net::TcpListener;
-use tokio::sync::RwLock;
-use tokio_tungstenite::accept_async;
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
@@ -146,40 +141,19 @@ async fn main() -> Result<(), Error> {
 
     match mode {
         OperationMode::Server => {
-            // Create a new TCP listener
-            let listener = TcpListener::bind(&args.server).await?;
-            println!("WebSocket server listening on {}", args.server);
+            println!("Starting WebSocket server on {}", args.server);
 
-            // Shared state for connected clients
-            let clients = Arc::new(RwLock::new(HashMap::<
-                std::net::SocketAddr,
-                tokio::sync::mpsc::UnboundedSender<tungstenite::Message>,
-            >::new()));
+            // Parse the server address
+            let addr = args
+                .server
+                .parse()
+                .map_err(|e| Error::Config(format!("Invalid server address: {}", e)))?;
 
-            // Accept incoming connections
-            while let Ok((stream, addr)) = listener.accept().await {
-                println!("New connection from: {}", addr);
-                let ws_stream = accept_async(stream).await?;
-                let client_clients = Arc::clone(&clients);
+            // Create and run the WebSocket server
+            let server = server::WsServer::new(addr);
 
-                // Spawn a new task for each connection
-                tokio::spawn(async move {
-                    let (mut _write, mut read) = ws_stream.split();
-
-                    // Handle messages from this client
-                    while let Some(Ok(msg)) = read.next().await {
-                        let clients = client_clients.read().await;
-                        // Broadcast message to all other clients
-                        for client_sink in clients.values() {
-                            let _ = client_sink.send(msg.clone());
-                        }
-                    }
-
-                    // Clean up disconnected client
-                    client_clients.write().await.remove(&addr);
-                    println!("Client disconnected: {}", addr);
-                });
-            }
+            // Run the server (this blocks until shutdown)
+            server.run().await.map_err(|e| Error::Server(e.into()))?;
         }
         _ => {
             let party_id = args.party_id.ok_or_else(|| {

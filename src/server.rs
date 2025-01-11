@@ -65,8 +65,9 @@
 //! * Message serialization errors
 //! * Client registration conflicts
 
-use crate::network::WireMessage;
+use crate::network::{ClientRegistration, WireMessage};
 use futures::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -203,7 +204,7 @@ impl WsServer {
 
         while let Ok((stream, addr)) = listener.accept().await {
             let clients = Arc::clone(&self.clients);
-            info!("New connection from: {}", addr);
+            info!("New connection from -: {}", addr);
 
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_connection(stream, addr, clients).await {
@@ -245,13 +246,13 @@ impl WsServer {
     /// * Protocol violations
     async fn handle_connection(
         stream: TcpStream,
-        _addr: SocketAddr,
+        addr: SocketAddr,
         clients: Arc<RwLock<HashMap<u16, ClientSession>>>,
     ) -> Result<(), ServerError> {
         let ws_stream = accept_async(stream).await?;
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
-        // Handle party ID registration
+        // Wait for initial message containing party ID
         let party_id = match ws_receiver.next().await {
             Some(Ok(msg)) => {
                 if let Some(id) = String::from_utf8(msg.into_data())
@@ -270,10 +271,10 @@ impl WsServer {
             }
         };
 
-        // Set up client session
+        // Create message channel for this client
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        // Register client in shared registry
+        // Register client
         {
             let mut clients_lock = clients.write().await;
             if clients_lock.contains_key(&party_id) {
@@ -293,7 +294,7 @@ impl WsServer {
             info!("Registered client with party ID: {}", party_id);
         }
 
-        // Spawn message handling tasks
+        // Handle incoming messages
         let clients_for_receiver = Arc::clone(&clients);
         let receiver_handle = tokio::spawn(async move {
             while let Some(Ok(msg)) = ws_receiver.next().await {
@@ -303,6 +304,7 @@ impl WsServer {
             }
         });
 
+        // Forward messages to client
         let sender_handle = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 if ws_sender.send(msg).await.is_err() {

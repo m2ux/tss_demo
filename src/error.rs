@@ -26,6 +26,7 @@
 //! ```
 
 use crate::network;
+use crate::server::ServerError;
 use crate::storage;
 
 /// Comprehensive error type encompassing all possible failure modes.
@@ -93,4 +94,7 @@ pub enum Error {
     /// Message parsing or protocol errors
     #[error("Message error: {0}")]
     Message(String),
+
+    #[error("Server error: {0}")]
+    Server(#[from] ServerError),
 }
