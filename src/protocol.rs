@@ -141,39 +141,41 @@ pub async fn run_committee_mode(
                 if committee_members.len() >= 5 {
                     println!("All committee members present. Establishing execution ID.");
                     state = CommitteeState::EstablishingExecutionId;
-
-                    // Lowest party ID proposes the execution ID
-                    if party_id == *committee_members.iter().min().unwrap() {
-                        let proposed_id = generate_unique_execution_id();
-                        execution_id_coord.propose(party_id, proposed_id.clone());
-                        broadcast_execution_id_proposal(party_id, proposed_id).await?;
-                    }
                 }
             }
             CommitteeState::EstablishingExecutionId => {
+                // Lowest party ID proposes the execution ID
+                if party_id == *committee_members.iter().min().unwrap() {
+                    let proposed_id = generate_unique_execution_id();
+                    execution_id_coord.propose(party_id, proposed_id.clone());
+                    broadcast_execution_id_proposal(party_id, proposed_id).await?;
+                    state = CommitteeState::AwaitingExecutionId;
+                }
                 // Non-proposing parties wait in this state until they receive a proposal
-                match receive_network_message(&mut receiver).await? {
-                    NetworkMessage::Control(ProtocolMessage::ExecutionIdProposal {
-                        party_id: proposer_id,
-                        execution_id,
-                    }) => {
-                        // Accept if proposer has lowest ID
-                        if proposer_id == *committee_members.iter().min().unwrap() {
-                            execution_id_coord.propose(proposer_id, execution_id.clone());
-                            broadcast_execution_id_accept(party_id, execution_id).await?;
-                            state = CommitteeState::AwaitingExecutionId;
-                        } else {
-                            println!("Ignoring proposal from non-lowest ID party {}", proposer_id);
+                else {
+                    match receive_network_message(&mut receiver).await? {
+                        NetworkMessage::Control(ProtocolMessage::ExecutionIdProposal {
+                                                    party_id: proposer_id,
+                                                    execution_id,
+                                                }) => {
+                            // Accept if proposer has lowest ID
+                            if proposer_id == *committee_members.iter().min().unwrap() {
+                                execution_id_coord.propose(proposer_id, execution_id.clone());
+                                broadcast_execution_id_accept(party_id, execution_id).await?;
+                                state = CommitteeState::AwaitingExecutionId;
+                            } else {
+                                println!("Ignoring proposal from non-lowest ID party {}", proposer_id);
+                            }
                         }
-                    }
-                    _ => {
-                        // Ignore other messages while waiting for proposal
+                        _ => {
+                            // Ignore other messages while waiting for proposal
+                        }
                     }
                 }
             }
             CommitteeState::AwaitingExecutionId => {
-                // This state is used while waiting for other parties to accept the proposed ID
-                if execution_id_coord.is_agreed(committee_members.len()) {
+                // This state is used while waiting for all parties to accept the proposed ID
+                if execution_id_coord.is_agreed(committee_members.len()-1) {
                     if let Some(agreed_id) = execution_id_coord.get_agreed_id() {
                         storage.save("execution_id", &agreed_id)?;
                         println!("Execution ID established: {:?}", agreed_id);
