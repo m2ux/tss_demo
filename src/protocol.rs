@@ -166,11 +166,6 @@ pub async fn run_committee_mode(
                             println!("Ignoring proposal from non-lowest ID party {}", proposer_id);
                         }
                     }
-                    NetworkMessage::Control(ProtocolMessage::CommitteeMemberAnnouncement {
-                        party_id: pid,
-                    }) => {
-                        committee_members.insert(pid);
-                    }
                     _ => {
                         // Ignore other messages while waiting for proposal
                     }
