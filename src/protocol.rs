@@ -155,16 +155,19 @@ pub async fn run_committee_mode(
                 else {
                     match receive_network_message(&mut receiver).await? {
                         NetworkMessage::Control(ProtocolMessage::ExecutionIdProposal {
-                                                    party_id: proposer_id,
-                                                    execution_id,
-                                                }) => {
+                            party_id: proposer_id,
+                            execution_id,
+                        }) => {
                             // Accept if proposer has lowest ID
                             if proposer_id == *committee_members.iter().min().unwrap() {
                                 execution_id_coord.propose(proposer_id, execution_id.clone());
                                 broadcast_execution_id_accept(party_id, execution_id).await?;
                                 state = CommitteeState::AwaitingExecutionId;
                             } else {
-                                println!("Ignoring proposal from non-lowest ID party {}", proposer_id);
+                                println!(
+                                    "Ignoring proposal from non-lowest ID party {}",
+                                    proposer_id
+                                );
                             }
                         }
                         _ => {
@@ -175,7 +178,7 @@ pub async fn run_committee_mode(
             }
             CommitteeState::AwaitingExecutionId => {
                 // This state is used while waiting for all parties to accept the proposed ID
-                if execution_id_coord.is_agreed(committee_members.len()-1) {
+                if execution_id_coord.is_agreed(committee_members.len() - 1) {
                     if let Some(agreed_id) = execution_id_coord.get_agreed_id() {
                         storage.save("execution_id", &agreed_id)?;
                         println!("Execution ID established: {:?}", agreed_id);
@@ -230,8 +233,15 @@ pub async fn run_committee_mode(
                 }
             }
             CommitteeState::Ready => {
+                let execution_id = storage.load::<String>("execution_id")?;
+
                 // Start handling signing requests
-                handle_signing_requests(&storage, party_id).await?;
+                handle_signing_requests(
+                    &storage,
+                    party_id,
+                    ExecutionId::new(&execution_id.as_bytes()),
+                )
+                .await?;
             }
         }
 
@@ -413,7 +423,23 @@ async fn broadcast_execution_id_proposal(party_id: u16, execution_id: String) ->
         party_id,
         execution_id,
     };
-    // ... implement broadcast logic ...
+
+    // Serialize the proposal message
+    let serialized = bincode::serialize(&proposal).map_err(Error::Serialization)?;
+
+    // Create new delivery instance
+    let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
+        "ws://localhost:8080",
+        party_id,
+    )
+    .await?;
+
+    // Split into receiver and sender
+    let (_receiver, sender) = delivery.split();
+
+    // Broadcast the serialized message
+    sender.broadcast(serialized).await.map_err(Error::Network)?;
+
     Ok(())
 }
 
@@ -423,7 +449,23 @@ async fn broadcast_execution_id_accept(party_id: u16, execution_id: String) -> R
         party_id,
         execution_id,
     };
-    // ... implement broadcast logic ...
+
+    // Serialize the accept message
+    let serialized = bincode::serialize(&accept).map_err(Error::Serialization)?;
+
+    // Create new delivery instance
+    let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
+        "ws://localhost:8080",
+        party_id,
+    )
+    .await?;
+
+    // Split into receiver and sender
+    let (_receiver, sender) = delivery.split();
+
+    // Broadcast the serialized message
+    sender.broadcast(serialized).await.map_err(Error::Network)?;
+
     Ok(())
 }
 
@@ -551,7 +593,11 @@ pub struct SigningRequest {
 }
 
 /// Handles signing requests after initialization
-pub async fn handle_signing_requests(storage: &KeyStorage, party_id: u16) -> Result<(), Error> {
+pub async fn handle_signing_requests(
+    storage: &KeyStorage,
+    party_id: u16,
+    eid: ExecutionId<'_>,
+) -> Result<(), Error> {
     /// Handles an incoming signing request
     async fn handle_signing_request(
         request: SigningRequest,
@@ -578,12 +624,9 @@ pub async fn handle_signing_requests(storage: &KeyStorage, party_id: u16) -> Res
             )
             .await?;
 
-        // Create execution ID for this signing session
-        let sign_eid = ExecutionId::new(request.message.as_bytes());
-
         // Perform the signing operation
         /*       let signature = cggmp21::signing(
-            sign_eid,
+            eid,
             party_id,
             aux_info,
             request.message.as_bytes(),
