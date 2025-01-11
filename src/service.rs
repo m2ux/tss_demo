@@ -1,11 +1,11 @@
-use cggmp21::keygen::ThresholdMsg;
-use cggmp21::security_level::SecurityLevel128;
-use cggmp21::supported_curves::Secp256k1;
-use sha2::Sha256;
 use crate::error::Error;
 use crate::network::WsDelivery;
 use crate::protocol::discover_committee_members;
 use crate::storage::KeyStorage;
+use cggmp21::keygen::ThresholdMsg;
+use cggmp21::security_level::SecurityLevel128;
+use cggmp21::supported_curves::Secp256k1;
+use sha2::Sha256;
 
 /// Runs the application in signing-service mode
 pub async fn run_service_mode(
@@ -22,7 +22,9 @@ pub async fn run_service_mode(
 
     // Check if we have enough committee members for threshold
     if committee.len() < 3 {
-        return Err(Error::Config("Not enough committee members available (minimum 3 required)".into()));
+        return Err(Error::Config(
+            "Not enough committee members available (minimum 3 required)".into(),
+        ));
     }
 
     //TODO

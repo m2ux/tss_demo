@@ -1,103 +1,106 @@
-use crate::{network, SigningSession};
 use crate::error::Error;
-use futures::StreamExt;
-use crate::network::{WsDelivery, NetworkError};
-use cggmp21::{
-    supported_curves::Secp256k1,
-    ExecutionId,
-    keygen::ThresholdMsg,
-    key_refresh::AuxOnlyMsg,
-    security_level::SecurityLevel128,
-    PregeneratedPrimes,
-};
+use crate::network::{NetworkError, WsDelivery};
 use crate::storage::KeyStorage;
-use sha2::Sha256;
+use crate::{network, SigningSession};
+use cggmp21::{
+    key_refresh::AuxOnlyMsg, key_share::AuxInfo, keygen::ThresholdMsg,
+    security_level::SecurityLevel128, supported_curves::Secp256k1, ExecutionId, PregeneratedPrimes,
+};
+use futures::StreamExt;
 use rand_core::OsRng;
-use round_based::{Delivery,MpcParty};
-use serde::{Serialize, Deserialize};
-use std::collections::{HashMap, HashSet};
-use tokio::sync::oneshot;
+use round_based::{Delivery, MpcParty};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use std::collections::HashSet;
 
-/// Manages active signing sessions
-struct SigningSessionManager {
-    sessions: HashMap<u16, SigningSession>,
+/// Represents the various stages of committee initialization and operation
+///
+/// The committee goes through several stages during its lifecycle:
+/// 1. Member announcement and collection
+/// 2. Generation and sharing of auxiliary cryptographic information
+/// 3. Distributed key generation
+/// 4. Ready state for signing operations
+#[derive(Debug, Clone, PartialEq)]
+enum CommitteeState {
+    /// Initial state where the committee is collecting member announcements.
+    /// Transitions to GeneratingAuxInfo when sufficient members (threshold) have joined.
+    AwaitingMembers,
+
+    /// State where members are generating their auxiliary cryptographic information
+    /// needed for the distributed key generation protocol.
+    GeneratingAuxInfo,
+
+    /// Waiting state where members announce completion of auxiliary info generation.
+    /// Transitions to GeneratingKeys when all members have completed.
+    AwaitingAuxInfo,
+
+    /// Active state where members are participating in the distributed key generation
+    /// protocol to create their shares of the group's signing key.
+    GeneratingKeys,
+
+    /// Waiting state where members announce completion of key generation.
+    /// Transitions to Ready when all members have their key shares.
+    AwaitingKeyGen,
+
+    /// Final operational state where the committee is fully initialized
+    /// and ready to process signing requests.
+    Ready,
 }
 
-impl SigningSessionManager {
-    fn new() -> Self {
-        Self {
-            sessions: HashMap::new(),
-        }
-    }
-
-    fn add_session(&mut self, party_id: u16, response_channel: oneshot::Sender<()>) {
-        self.sessions.insert(party_id, SigningSession {
-            response_channel,
-            party_id,
-        });
-    }
-
-    fn remove_session(&mut self, party_id: u16) -> Option<SigningSession> {
-        self.sessions.remove(&party_id)
-    }
-}
-
-/// Protocol message types for WebSocket communication
+/// Defines the structure and types of control messages used for committee coordination
+///
+/// These messages handle committee formation, state synchronization, and signing operations
 #[derive(Serialize, Deserialize, Debug)]
 enum ProtocolMessage {
-    /// Announce presence as a committee member
+    /// Sent by a party to announce their presence and join the committee
+    /// - party_id: Unique identifier of the announcing party
     CommitteeMemberAnnouncement { party_id: u16 },
-    /// Response with current committee state
+
+    /// Response message containing the current state of the committee
+    /// - members: Set of party IDs that have joined the committee
+    /// - aux_info_ready: Set of parties that have completed auxiliary info generation
+    /// - keygen_ready: Set of parties that have completed key generation
     CommitteeState {
         members: HashSet<u16>,
         aux_info_ready: HashSet<u16>,
         keygen_ready: HashSet<u16>,
     },
-    /// Announce auxiliary info generation completion
+
+    /// Announcement that a party has completed generating auxiliary information
+    /// - party_id: ID of the party that completed aux info generation
     AuxInfoReady { party_id: u16 },
-    /// Announce key generation completion
+
+    /// Announcement that a party has completed key generation
+    /// - party_id: ID of the party that completed key generation
     KeyGenReady { party_id: u16 },
-    /// Initiate signing process
-    SigningRequest {
-        message: String,
-        initiator: u16,
-    },
-    /// Accept participation in signing
-    SigningAccept { party_id: u16 },
-    /// Share the resulting signature
-    SignatureShare {
-        party_id: u16,
-        share: Vec<u8>,
-    },
+
+    /// Request to initiate a signing operation
+    /// - message: The message to be signed
+    /// - initiator: ID of the party requesting the signature
+    /// - session_id: Unique session identifier for this signing operation
+    SigningRequest { message: String, initiator: u16 },
+
+    /// Message containing a party's share of the signature
+    /// - party_id: ID of the party providing the signature share
+    /// - session_id: Session identifier for this signature
+    /// - share: The signature share data
+    SignatureShare { party_id: u16, share: Vec<u8> },
 }
 
-/// Committee initialization states
-#[derive(Debug, Clone, PartialEq)]
-enum CommitteeState {
-    /// Waiting for all members to announce presence
-    AwaitingMembers,
-    /// Generating auxiliary information
-    GeneratingAuxInfo,
-    /// Waiting for all members to complete aux info generation
-    AwaitingAuxInfo,
-    /// Performing distributed key generation
-    GeneratingKeys,
-    /// Waiting for all members to complete key generation
-    AwaitingKeyGen,
-    /// Ready for signing operations
-    Ready,
-}
-
-/// Message types that can be received from the network
+/// Represents different types of messages that can be exchanged over the network
+///
+/// Generic parameter M represents the type of protocol-specific message
 #[derive(Debug)]
 enum NetworkMessage<M> {
-    /// Protocol-specific messages
+    /// Messages specific to the underlying cryptographic protocol
+    /// Contains structured data of type round_based::Incoming<M>
     Protocol(round_based::Incoming<M>),
-    /// Our custom protocol messages
+
+    /// Messages for committee coordination and management
     Control(ProtocolMessage),
 }
 
-/// Runs the application in committee mode, participating in the signing committee
+/// Runs the application in committee mode, ie participating in the signing committee
 pub async fn run_committee_mode(
     delivery: WsDelivery<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>,
     storage: KeyStorage,
@@ -126,57 +129,40 @@ pub async fn run_committee_mode(
                     println!("All committee members present. Starting auxiliary info generation.");
                     state = CommitteeState::GeneratingAuxInfo;
                 }
-            },
+            }
             CommitteeState::GeneratingAuxInfo => {
-                // Create a new delivery instance for aux info generation
-                let aux_delivery = WsDelivery::<AuxOnlyMsg<Sha256, SecurityLevel128>>::connect(
-                    &server_addr,
-                    party_id,
-                ).await?;
-
                 // Generate auxiliary info as per CGGMP21
-                let aux_info = generate_auxiliary_info(
-                    party_id,
-                    committee_members.len() as u16,
-                    aux_delivery,
-                ).await?;
+                let aux_info =
+                    generate_auxiliary_info(party_id, committee_members.len() as u16, &server_addr)
+                        .await?;
                 storage.save("aux_info", &aux_info)?;
 
                 broadcast_aux_info_ready(party_id).await?;
                 aux_info_ready.insert(party_id);
                 state = CommitteeState::AwaitingAuxInfo;
-            },
+            }
             CommitteeState::AwaitingAuxInfo => {
                 if aux_info_ready.len() >= 5 {
                     println!("All auxiliary info generated. Starting key generation.");
                     state = CommitteeState::GeneratingKeys;
                 }
-            },
+            }
             CommitteeState::GeneratingKeys => {
-                // Create a new delivery instance for key generation
-                let keygen_delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
-                    &server_addr,
-                    party_id,
-                ).await?;
-
                 // Perform distributed key generation
-                let key_share = generate_key_share(
-                    party_id,
-                    &committee_members,
-                    keygen_delivery,
-                ).await?;
-                storage.save("incomplete_key_share", &key_share)?;
+                let key_share =
+                    generate_key_share(party_id, &committee_members, &server_addr).await?;
+                storage.save("key_share", &key_share)?;
 
                 broadcast_keygen_ready(party_id).await?;
                 keygen_ready.insert(party_id);
                 state = CommitteeState::AwaitingKeyGen;
-            },
+            }
             CommitteeState::AwaitingKeyGen => {
                 if keygen_ready.len() >= 5 {
                     println!("Key generation complete. Ready for signing operations.");
                     state = CommitteeState::Ready;
                 }
-            },
+            }
             CommitteeState::Ready => {
                 // Start handling signing requests
                 handle_signing_requests(&storage, party_id).await?;
@@ -188,13 +174,13 @@ pub async fn run_committee_mode(
             NetworkMessage::Control(msg) => match msg {
                 ProtocolMessage::CommitteeMemberAnnouncement { party_id: pid } => {
                     committee_members.insert(pid);
-                },
+                }
                 ProtocolMessage::AuxInfoReady { party_id: pid } => {
                     aux_info_ready.insert(pid);
-                },
+                }
                 ProtocolMessage::KeyGenReady { party_id: pid } => {
                     keygen_ready.insert(pid);
-                },
+                }
                 _ => {}
             },
             NetworkMessage::Protocol(_) => {
@@ -208,28 +194,26 @@ pub async fn run_committee_mode(
 async fn generate_auxiliary_info(
     party_id: u16,
     n_parties: u16,
-    delivery: WsDelivery<AuxOnlyMsg<Sha256, SecurityLevel128>>, // Updated message type
+    server_addr: &str,
 ) -> Result<Vec<u8>, Error> {
     println!("Generating auxiliary information for party {}", party_id);
 
+    // Create a new delivery instance for aux info generation
+    let delivery =
+        WsDelivery::<AuxOnlyMsg<Sha256, SecurityLevel128>>::connect(server_addr, party_id).await?;
+
     // Prime generation can take a while
-    let pregenerated_primes = PregeneratedPrimes::generate(&mut OsRng);
+    let primes = PregeneratedPrimes::generate(&mut OsRng);
 
     let eid = ExecutionId::new(b"aux-info-1");
 
-    let aux_info = cggmp21::aux_info_gen(
-        eid,
-        party_id,
-        n_parties,
-        pregenerated_primes
-    )
+    let aux_info = cggmp21::aux_info_gen(eid, party_id, n_parties, primes)
         .start(&mut OsRng, MpcParty::connected(delivery))
         .await
-        .map_err(Error::KeyRefresh)?;
+        .map_err(|e| Error::Protocol(e.to_string()))?;
 
     // Serialize the auxiliary information
-    let serialized = bincode::serialize(&aux_info)
-        .map_err(Error::Serialization)?;
+    let serialized = bincode::serialize(&aux_info).map_err(Error::Serialization)?;
 
     println!("Auxiliary information generated successfully");
     Ok(serialized)
@@ -239,26 +223,28 @@ async fn generate_auxiliary_info(
 async fn generate_key_share(
     party_id: u16,
     committee: &HashSet<u16>,
-    delivery: WsDelivery<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>,
+    server_addr: &str,
 ) -> Result<Vec<u8>, Error> {
     println!("Starting distributed key generation for party {}", party_id);
 
+    // Create a new delivery instance for key generation
+    let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
+        server_addr,
+        party_id,
+    )
+    .await?;
+
     // Initialize key generation with CGGMP21
     let keygen_eid = ExecutionId::new(b"keygen-1");
-    let keygen = cggmp21::keygen::<Secp256k1>(
-        keygen_eid,
-        party_id,
-        committee.len() as u16
-    )
+    let keygen = cggmp21::keygen::<Secp256k1>(keygen_eid, party_id, committee.len() as u16)
         .set_threshold(3)
         .enforce_reliable_broadcast(true)
         .start(&mut OsRng, MpcParty::connected(delivery))
         .await
-        .map_err(Error::Keygen)?;
+        .map_err(|e| Error::Protocol(e.to_string()))?;
 
     // Serialize the key share
-    let key_share = bincode::serialize(&keygen)
-        .map_err(Error::Serialization)?;
+    let key_share = bincode::serialize(&keygen).map_err(Error::Serialization)?;
 
     Ok(key_share)
 }
@@ -271,66 +257,69 @@ async fn broadcast_committee_announcement(party_id: u16) -> Result<(), Error> {
     let announcement = ProtocolMessage::CommitteeMemberAnnouncement { party_id };
 
     // Serialize the announcement
-    let serialized = bincode::serialize(&announcement)
-        .map_err(Error::Serialization)?;
+    let serialized = bincode::serialize(&announcement).map_err(Error::Serialization)?;
 
     // Send the announcement to all connected peers
     let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
-        "ws://localhost:8080",  // Use configured server address here
-        party_id
-    ).await?;
+        "ws://localhost:8080", // Use configured server address here
+        party_id,
+    )
+    .await?;
 
     let (_receiver, sender) = delivery.split();
-    sender.broadcast(serialized).await
-        .map_err(Error::Network)?;
+    sender.broadcast(serialized).await.map_err(Error::Network)?;
 
     Ok(())
 }
 
 /// Broadcasts auxiliary-info completion status
 async fn broadcast_aux_info_ready(party_id: u16) -> Result<(), Error> {
-    println!("Broadcasting auxiliary info completion for party {}", party_id);
+    println!(
+        "Broadcasting auxiliary info completion for party {}",
+        party_id
+    );
 
     // Create the completion status message
     let ready_msg = ProtocolMessage::AuxInfoReady { party_id };
 
     // Serialize the message
-    let serialized = bincode::serialize(&ready_msg)
-        .map_err(Error::Serialization)?;
+    let serialized = bincode::serialize(&ready_msg).map_err(Error::Serialization)?;
 
     // Send the message to all connected peers
     let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
-        "ws://localhost:8080",  // Use configured server address here
-        party_id
-    ).await?;
+        "ws://localhost:8080", // Use configured server address here
+        party_id,
+    )
+    .await?;
 
     let (_receiver, sender) = delivery.split();
-    sender.broadcast(serialized).await
-        .map_err(Error::Network)?;
+    sender.broadcast(serialized).await.map_err(Error::Network)?;
 
     Ok(())
 }
 
 /// Broadcasts key-generation completion status
 async fn broadcast_keygen_ready(party_id: u16) -> Result<(), Error> {
-    println!("Broadcasting key generation completion for party {}", party_id);
+    println!(
+        "Broadcasting key generation completion for party {}",
+        party_id
+    );
 
     // Create the completion status message
     let ready_msg = ProtocolMessage::KeyGenReady { party_id };
 
     // Serialize the message
-    let serialized = bincode::serialize(&ready_msg)
-        .map_err(Error::Serialization)?;
+    let serialized = bincode::serialize(&ready_msg).map_err(Error::Serialization)?;
 
     // Send the message to all connected peers
     let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
-        "ws://localhost:8080",  // Use configured server address here
-        party_id
-    ).await?;
+        "ws://localhost:8080", // Use configured server address here
+        party_id,
+    )
+    .await?;
 
     let (_receiver, sender) = delivery.split();
-    sender.broadcast(serialized).await
-        .map_err(Error::Network)?;
+    sender.broadcast(serialized).await.map_err(Error::Network)?;
 
     Ok(())
 }
@@ -342,8 +331,9 @@ pub async fn discover_committee_members() -> Result<HashSet<u16>, Error> {
     // Connect to the WebSocket server
     let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
         "ws://localhost:8080", // This should use the configured server address
-        0, // Use party ID 0 for discovery
-    ).await?;
+        0,                     // Use party ID 0 for discovery
+    )
+    .await?;
 
     // Split into receiver and sender
     let (mut receiver, sender) = delivery.split();
@@ -403,38 +393,22 @@ pub async fn discover_committee_members() -> Result<HashSet<u16>, Error> {
 /// Waits for and receives signing requests
 async fn await_signing_request() -> Result<Option<SigningRequest>, Error> {
     println!("Waiting for signing requests...");
-    // TODO: Implement actual request handling
-    Ok(None)
-}
 
-/// Structure representing a signing request
-#[derive(Debug)]
-struct SigningRequest {
-    message: String,
-    initiator: u16,
-}
+    // Connect to websocket server
+    let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
+        "ws://localhost:8080",
+        0, // Use 0 for monitoring requests
+    )
+    .await?;
 
-/// Handles signing requests after initialization
-async fn handle_signing_requests(storage: &KeyStorage, _party_id: u16) -> Result<(), Error> {
+    let (mut receiver, _sender) = delivery.split();
 
-    /// Handles an incoming signing request
-    async fn handle_signing_request(
-        request: SigningRequest,
-        storage: &KeyStorage,
-    ) -> Result<(), Error> {
-        println!("Handling signing request from party {}", request.initiator);
-
-        // Load the key share
-        let _key_share = storage.load::<Vec<u8>>("incomplete_key_share")?;
-
-        // TODO: Implement actual signing request handling
-        Ok(())
-    }
-
-    loop {
-        if let Some(request) = await_signing_request().await? {
-            handle_signing_request(request, storage).await?;
+    // Process incoming messages
+    match receive_network_message(&mut receiver).await? {
+        NetworkMessage::Control(ProtocolMessage::SigningRequest { message, initiator }) => {
+            Ok(Some(SigningRequest { message, initiator }))
         }
+        _ => Ok(None),
     }
 }
 
@@ -443,12 +417,10 @@ async fn receive_network_message<M>(
     receiver: &mut network::WsReceiver<M>,
 ) -> Result<NetworkMessage<M>, Error>
 where
-    M: serde::Serialize + for<'de> serde::Deserialize<'de> + std::marker::Unpin,
+    M: serde::Serialize + for<'de> serde::Deserialize<'de> + Unpin,
 {
     match receiver.next().await {
         Some(Ok(incoming)) => {
-            // The incoming message is already deserialized as Incoming<M>
-            // Try to cast the message as a ProtocolMessage
             match bincode::serialize(&incoming.msg) {
                 Ok(bytes) => {
                     if let Ok(control_msg) = bincode::deserialize::<ProtocolMessage>(&bytes) {
@@ -457,11 +429,91 @@ where
                         // If it's not a control message, return it as a protocol message
                         Ok(NetworkMessage::Protocol(incoming))
                     }
-                },
-                Err(_) => Ok(NetworkMessage::Protocol(incoming))
+                }
+                Err(_) => Ok(NetworkMessage::Protocol(incoming)),
             }
-        },
+        }
         Some(Err(e)) => Err(Error::Network(e)),
-        None => Err(Error::Network(NetworkError::Connection("Connection closed".into())))
+        None => Err(Error::Network(NetworkError::Connection(
+            "Connection closed".into(),
+        ))),
+    }
+}
+
+/// Structure representing a signing request
+#[derive(Debug)]
+pub struct SigningRequest {
+    pub message: String,
+    pub initiator: u16,
+}
+
+/// Handles signing requests after initialization
+pub async fn handle_signing_requests(storage: &KeyStorage, party_id: u16) -> Result<(), Error> {
+    /// Handles an incoming signing request
+    async fn handle_signing_request(
+        request: SigningRequest,
+        storage: &KeyStorage,
+        party_id: u16,
+    ) -> Result<(), Error> {
+        println!("Handling signing request from party {}", request.initiator);
+
+        // Load the key share and aux info
+        let key_share_bytes = storage.load::<Vec<u8>>("key_share")?;
+        let aux_info_bytes = storage.load::<Vec<u8>>("aux_info")?;
+
+        // Deserialize the key share and aux info
+        let key_share: cggmp21::KeyShare<Secp256k1, SecurityLevel128> =
+            bincode::deserialize(&key_share_bytes).map_err(Error::Serialization)?;
+        let aux_info: AuxInfo<SecurityLevel128> =
+            bincode::deserialize(&aux_info_bytes).map_err(Error::Serialization)?;
+
+        // Create a new delivery instance for signing
+        let sign_delivery =
+            WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
+                "ws://localhost:8080",
+                party_id,
+            )
+            .await?;
+
+        // Create execution ID for this signing session
+        let sign_eid = ExecutionId::new(request.message.as_bytes());
+
+        // Perform the signing operation
+        /*       let signature = cggmp21::signing(
+            sign_eid,
+            party_id,
+            aux_info,
+            request.message.as_bytes(),
+        )
+            .start(&mut OsRng, MpcParty::connected(sign_delivery))
+            .await
+            .map_err(|e| Error::Protocol(e.to_string()))?;
+
+        // Create signature share message
+        let signature_msg = crate::protocol::ProtocolMessage::SignatureShare {
+            party_id,
+            share: bincode::serialize(&signature).map_err(Error::Serialization)?,
+        };
+
+        // Broadcast signature share
+        let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
+            "ws://localhost:8080",
+            party_id,
+        ).await?;
+
+        let (_receiver, sender) = delivery.split();
+        sender.broadcast(bincode::serialize(&signature_msg).map_err(Error::Serialization)?)
+            .await
+            .map_err(Error::Network)?;*/
+        ///TODO: Fix me
+
+        println!("Signature share generated and broadcast successfully");
+        Ok(())
+    }
+
+    loop {
+        if let Some(request) = crate::protocol::await_signing_request().await? {
+            handle_signing_request(request, storage, party_id).await?;
+        }
     }
 }

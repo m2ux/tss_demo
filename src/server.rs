@@ -66,21 +66,14 @@
 //! * Client registration conflicts
 
 use crate::network::WireMessage;
+use futures::{SinkExt, StreamExt};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{mpsc, RwLock},
 };
-use tokio_tungstenite::{
-    accept_async,
-    tungstenite::Message,
-};
-use futures::{StreamExt, SinkExt};
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::Arc,
-};
-use tracing::{info, warn, error};
+use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tracing::{error, info, warn};
 
 /// Represents a connected client session in the WebSocket server.
 ///
@@ -270,7 +263,11 @@ impl WsServer {
                     return Err(ServerError::Registration("Invalid party ID format".into()));
                 }
             }
-            _ => return Err(ServerError::Registration("Failed to receive party ID".into())),
+            _ => {
+                return Err(ServerError::Registration(
+                    "Failed to receive party ID".into(),
+                ))
+            }
         };
 
         // Set up client session
@@ -280,13 +277,18 @@ impl WsServer {
         {
             let mut clients_lock = clients.write().await;
             if clients_lock.contains_key(&party_id) {
-                return Err(ServerError::Registration("Party ID already registered".into()));
+                return Err(ServerError::Registration(
+                    "Party ID already registered".into(),
+                ));
             }
 
-            clients_lock.insert(party_id, ClientSession {
+            clients_lock.insert(
                 party_id,
-                sender: tx,
-            });
+                ClientSession {
+                    party_id,
+                    sender: tx,
+                },
+            );
 
             info!("Registered client with party ID: {}", party_id);
         }
@@ -361,7 +363,7 @@ impl WsServer {
                     } else {
                         warn!("Recipient {} not found for P2P message", receiver_id);
                     }
-                },
+                }
                 None => {
                     for (id, session) in clients_lock.iter() {
                         if *id != sender_id {
@@ -379,9 +381,9 @@ impl WsServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::SinkExt;
     use std::net::{IpAddr, Ipv4Addr};
     use tokio_tungstenite::connect_async;
-    use futures::SinkExt;
 
     /// Tests basic server startup functionality
     #[tokio::test]

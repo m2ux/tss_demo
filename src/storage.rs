@@ -32,13 +32,13 @@
 //! }
 //! ```
 
-use std::path::{Path, PathBuf};
-use serde::{Serialize, Deserialize};
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
-use sha2::{Sha256, Digest};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 
 /// Errors that can occur during storage operations.
 ///
@@ -112,8 +112,7 @@ impl KeyStorage {
         hasher.update(encryption_key.as_bytes());
         let key = hasher.finalize();
 
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|_| StorageError::Encryption)?;
+        let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| StorageError::Encryption)?;
 
         Ok(Self {
             storage_path: storage_path.as_ref().to_owned(),
@@ -150,7 +149,8 @@ impl KeyStorage {
         let serialized = bincode::serialize(data)?;
         let nonce = Nonce::from_slice(b"unique nonce"); // In production, generate a unique nonce
 
-        let encrypted = self.cipher
+        let encrypted = self
+            .cipher
             .encrypt(nonce, serialized.as_ref())
             .map_err(|_| StorageError::Encryption)?;
 
@@ -191,7 +191,8 @@ impl KeyStorage {
         let encrypted = std::fs::read(path)?;
 
         let nonce = Nonce::from_slice(b"unique nonce"); // Must match the nonce used for encryption
-        let decrypted = self.cipher
+        let decrypted = self
+            .cipher
             .decrypt(nonce, encrypted.as_ref())
             .map_err(|_| StorageError::Encryption)?;
 
@@ -202,9 +203,9 @@ impl KeyStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::{Deserialize, Serialize};
     use std::fs;
     use tempfile::TempDir;
-    use serde::{Serialize, Deserialize};
 
     /// Helper function to create a temporary directory for testing
     fn setup_test_dir() -> TempDir {

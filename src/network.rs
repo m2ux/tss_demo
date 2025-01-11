@@ -29,13 +29,18 @@
 //! }
 //! ```
 
-use futures::{Stream, Sink, StreamExt};
-use tokio::net::TcpStream;
-use tokio_tungstenite::{connect_async, WebSocketStream, MaybeTlsStream};
-use round_based::{Delivery, MessageDestination};
-use serde::{Deserialize,Serialize};
-use std::{marker::PhantomData, pin::Pin, sync::atomic::{AtomicU64, Ordering}, num::Wrapping};
 use futures::channel::mpsc;
+use futures::{Sink, Stream, StreamExt};
+use round_based::{Delivery, MessageDestination};
+use serde::{Deserialize, Serialize};
+use std::{
+    marker::PhantomData,
+    num::Wrapping,
+    pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
+};
+use tokio::net::TcpStream;
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 /// Thread-safe message ID generator with overflow handling.
 ///
@@ -83,10 +88,7 @@ pub enum NetworkError {
 
     /// Message ordering violation errors
     #[error("Invalid message ID: expected >= {expected}, got {actual}")]
-    InvalidMessageId {
-        expected: u64,
-        actual: u64,
-    },
+    InvalidMessageId { expected: u64, actual: u64 },
 }
 
 //// Tracks message ordering state to ensure proper message sequencing.
@@ -180,7 +182,7 @@ pub struct WsSender<M> {
 
 impl<M> WsSender<M>
 where
-    M: Serialize + for<'de> Deserialize<'de>
+    M: Serialize + for<'de> Deserialize<'de>,
 {
     /// Broadcasts a message to all connected parties
     ///
@@ -195,14 +197,15 @@ where
         let wire_msg = WireMessage {
             id: MESSAGE_ID_GEN.next_id(),
             sender: self.party_id,
-            receiver: None,  // None indicates broadcast
+            receiver: None, // None indicates broadcast
             payload: message,
         };
 
         let encoded = bincode::serialize(&wire_msg)
             .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
 
-        self.sender.unbounded_send(encoded)
+        self.sender
+            .unbounded_send(encoded)
             .map_err(|_| NetworkError::ChannelClosed)?;
 
         Ok(())
@@ -261,7 +264,7 @@ pub struct WsDelivery<M> {
 
 impl<M> WsDelivery<M>
 where
-    M: serde::Serialize + for<'de> serde::Deserialize<'de>
+    M: serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
     /// Establishes a new WebSocket connection to the specified server.
     ///
@@ -286,12 +289,12 @@ where
             sender: WsSender {
                 sender: tx,
                 party_id,
-                _phantom: PhantomData
+                _phantom: PhantomData,
             },
             receiver: WsReceiver {
                 receiver: rx,
                 message_state: MessageState::new(),
-                _phantom: PhantomData
+                _phantom: PhantomData,
             },
             server_addr: server_addr.to_string(),
         })
@@ -354,7 +357,7 @@ async fn handle_websocket(
 /// - The implementation is thread-safe and can be used across async tasks
 impl<M> Sink<round_based::Outgoing<M>> for WsSender<M>
 where
-    M: serde::Serialize + for<'de> serde::Deserialize<'de>
+    M: serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
     type Error = NetworkError;
 
@@ -367,7 +370,10 @@ where
     ///
     /// - `Poll::Ready(Ok(()))`: The sink is ready to accept a new message
     /// - Never returns `Poll::Pending` or `Err` in this implementation
-    fn poll_ready(self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
         std::task::Poll::Ready(Ok(()))
     }
 
@@ -392,13 +398,15 @@ where
             id: MESSAGE_ID_GEN.next_id(),
             sender: self.party_id,
             receiver: WireMessage::from_message_destination(Some(item.recipient)),
-            payload: bincode::serialize(&item.msg).map_err(|_| NetworkError::Connection("Serialization failed".into()))?,
+            payload: bincode::serialize(&item.msg)
+                .map_err(|_| NetworkError::Connection("Serialization failed".into()))?,
         };
 
         let encoded = bincode::serialize(&wire_msg)
             .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
 
-        self.sender.unbounded_send(encoded)
+        self.sender
+            .unbounded_send(encoded)
             .map_err(|_| NetworkError::ChannelClosed)
     }
 
@@ -410,7 +418,10 @@ where
     /// # Returns
     ///
     /// Always returns `Poll::Ready(Ok(()))` as there is no buffering
-    fn poll_flush(self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
         std::task::Poll::Ready(Ok(()))
     }
 
@@ -422,7 +433,10 @@ where
     /// # Returns
     ///
     /// Always returns `Poll::Ready(Ok(()))` as there is no specific close operation
-    fn poll_close(self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_close(
+        self: Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
         std::task::Poll::Ready(Ok(()))
     }
 }
@@ -460,7 +474,7 @@ where
 /// - The implementation is compatible with async stream combinators
 impl<M> Stream for WsReceiver<M>
 where
-    M: serde::Serialize + for<'de> serde::Deserialize<'de>
+    M: serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
     type Item = Result<round_based::Incoming<M>, NetworkError>;
 
@@ -484,7 +498,10 @@ where
     ///
     /// - `NetworkError::Connection`: Message deserialization failed
     /// - `NetworkError::InvalidMessageId`: Message arrived out of sequence
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
         let receiver = unsafe { &mut self.as_mut().get_unchecked_mut().receiver };
         let poll_result = Pin::new(receiver).poll_next(cx);
         let message_state = unsafe { &mut self.get_unchecked_mut().message_state };
@@ -493,7 +510,11 @@ where
             std::task::Poll::Ready(Some(data)) => {
                 let wire_msg: WireMessage = match bincode::deserialize(&data) {
                     Ok(msg) => msg,
-                    Err(_) => return std::task::Poll::Ready(Some(Err(NetworkError::Connection("Deserialization failed".into()))))
+                    Err(_) => {
+                        return std::task::Poll::Ready(Some(Err(NetworkError::Connection(
+                            "Deserialization failed".into(),
+                        ))))
+                    }
                 };
 
                 // Validate message ID
@@ -503,11 +524,18 @@ where
 
                 let message = match bincode::deserialize(&wire_msg.payload) {
                     Ok(msg) => msg,
-                    Err(_) => return std::task::Poll::Ready(Some(Err(NetworkError::Connection("Deserialization failed".into()))))
+                    Err(_) => {
+                        return std::task::Poll::Ready(Some(Err(NetworkError::Connection(
+                            "Deserialization failed".into(),
+                        ))))
+                    }
                 };
 
-                let msg_type = wire_msg.to_message_destination()
-                    .map_or(round_based::MessageType::Broadcast, |_| round_based::MessageType::P2P);
+                let msg_type = wire_msg
+                    .to_message_destination()
+                    .map_or(round_based::MessageType::Broadcast, |_| {
+                        round_based::MessageType::P2P
+                    });
 
                 std::task::Poll::Ready(Some(Ok(round_based::Incoming {
                     id: wire_msg.id,
@@ -515,7 +543,7 @@ where
                     msg: message,
                     msg_type,
                 })))
-            },
+            }
             std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
@@ -559,7 +587,7 @@ where
 /// - The implementation is compatible with the round-based protocol requirements
 impl<M> Delivery<M> for WsDelivery<M>
 where
-    M: serde::Serialize + for<'de> serde::Deserialize<'de> + std::marker::Unpin
+    M: serde::Serialize + for<'de> serde::Deserialize<'de> + std::marker::Unpin,
 {
     type Send = WsSender<M>;
     type Receive = WsReceiver<M>;

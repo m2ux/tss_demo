@@ -220,7 +220,8 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 [[package]]
 name = "cggmp21"
 version = "0.6.0"
-source = "git+https://github.com/LFDT-Lockness/cggmp21?branch=m#ddd348d550ffa3393f49e38b062a793756c7e614"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "251e13fefa29935b4d502580e340b79fbdbe2fb3189e7b16054fe2252895a4e0"
 dependencies = [
  "cggmp21-keygen",
  "digest",
@@ -244,7 +245,8 @@ dependencies = [
 [[package]]
 name = "cggmp21-keygen"
 version = "0.5.0"
-source = "git+https://github.com/LFDT-Lockness/cggmp21?branch=m#ddd348d550ffa3393f49e38b062a793756c7e614"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaa8c850290c494f951abe0350e56c31e4f5664863490197490ff48cb825447d"
 dependencies = [
  "digest",
  "displaydoc",
@@ -1061,7 +1063,8 @@ dependencies = [
 [[package]]
 name = "key-share"
 version = "0.6.0"
-source = "git+https://github.com/LFDT-Lockness/cggmp21?branch=m#ddd348d550ffa3393f49e38b062a793756c7e614"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ee8e510bb9f738ac400b7dedd98aeb23677c6b48cd3b1b682651ea5091f4282"
 dependencies = [
  "displaydoc",
  "generic-ec",
@@ -1824,14 +1827,12 @@ dependencies = [
  "rand_core",
  "round-based",
  "serde",
- "serde_json",
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite",
  "tracing",
- "url",
 ]
 
 [[package]]

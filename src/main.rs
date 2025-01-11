@@ -47,25 +47,23 @@
 //! * Curve: secp256k1
 //! * Hash function: SHA256
 
-mod network;
-mod storage;
 mod error;
-mod server;
+mod network;
 mod protocol;
+mod server;
 mod service;
+mod storage;
 
+use cggmp21::{
+    keygen::ThresholdMsg, security_level::SecurityLevel128, supported_curves::Secp256k1,
+};
 use clap::Parser;
 use error::Error;
 use network::WsDelivery;
 use protocol::run_committee_mode;
-use cggmp21::{
-    supported_curves::Secp256k1,
-    keygen::ThresholdMsg,
-    security_level::SecurityLevel128,
-};
 use service::run_service_mode;
-use storage::KeyStorage;
 use sha2::Sha256;
+use storage::KeyStorage;
 use tokio::sync::oneshot;
 
 /// Internal state tracking for signing sessions
@@ -116,14 +114,13 @@ async fn main() -> Result<(), Error> {
     } else if let Some(msg) = args.message.clone() {
         OperationMode::Service(msg)
     } else {
-        return Err(Error::Config("Either --committee or --message must be specified".into()));
+        return Err(Error::Config(
+            "Either --committee or --message must be specified".into(),
+        ));
     };
 
     // Initialize storage
-    let storage = KeyStorage::new(
-        "keys",
-        "a very secret key that should be properly secured",
-    )?;
+    let storage = KeyStorage::new("keys", "a very secret key that should be properly secured")?;
 
     // Initialize network connection
     type Msg = ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>;
@@ -133,7 +130,7 @@ async fn main() -> Result<(), Error> {
     match mode {
         OperationMode::Committee => {
             run_committee_mode(delivery, storage, args.party_id).await?;
-        },
+        }
         OperationMode::Service(message) => {
             run_service_mode(delivery, storage, args.party_id, message).await?;
         }
