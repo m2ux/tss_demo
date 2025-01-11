@@ -1,7 +1,7 @@
 use crate::error::Error;
+use crate::network;
 use crate::network::{NetworkError, WsDelivery};
 use crate::storage::KeyStorage;
-use crate::{network, SigningSession};
 use cggmp21::{
     key_refresh::AuxOnlyMsg, key_share::AuxInfo, keygen::ThresholdMsg,
     security_level::SecurityLevel128, supported_curves::Secp256k1, ExecutionId, PregeneratedPrimes,
@@ -25,6 +25,12 @@ enum CommitteeState {
     /// Initial state where the committee is collecting member announcements.
     /// Transitions to GeneratingAuxInfo when sufficient members (threshold) have joined.
     AwaitingMembers,
+
+    /// Proposing/accepting execution ID
+    EstablishingExecutionId,
+
+    /// Waiting for execution ID agreement
+    AwaitingExecutionId,
 
     /// State where members are generating their auxiliary cryptographic information
     /// needed for the distributed key generation protocol.
@@ -55,6 +61,12 @@ enum ProtocolMessage {
     /// Sent by a party to announce their presence and join the committee
     /// - party_id: Unique identifier of the announcing party
     CommitteeMemberAnnouncement { party_id: u16 },
+
+    /// Propose an execution ID for this session
+    ExecutionIdProposal { party_id: u16, execution_id: String },
+
+    /// Accept a proposed execution ID
+    ExecutionIdAccept { party_id: u16, execution_id: String },
 
     /// Response message containing the current state of the committee
     /// - members: Set of party IDs that have joined the committee
@@ -115,6 +127,7 @@ pub async fn run_committee_mode(
     let mut committee_members = HashSet::new();
     let mut aux_info_ready = HashSet::new();
     let mut keygen_ready = HashSet::new();
+    let mut execution_id_coord = ExecutionIdCoordination::new();
     let mut state = CommitteeState::AwaitingMembers;
 
     // Announce presence
@@ -126,15 +139,64 @@ pub async fn run_committee_mode(
         match state {
             CommitteeState::AwaitingMembers => {
                 if committee_members.len() >= 5 {
-                    println!("All committee members present. Starting auxiliary info generation.");
-                    state = CommitteeState::GeneratingAuxInfo;
+                    println!("All committee members present. Establishing execution ID.");
+                    state = CommitteeState::EstablishingExecutionId;
+
+                    // Lowest party ID proposes the execution ID
+                    if party_id == *committee_members.iter().min().unwrap() {
+                        let proposed_id = generate_unique_execution_id();
+                        execution_id_coord.propose(party_id, proposed_id.clone());
+                        broadcast_execution_id_proposal(party_id, proposed_id).await?;
+                    }
+                }
+            }
+            CommitteeState::EstablishingExecutionId => {
+                // Non-proposing parties wait in this state until they receive a proposal
+                match receive_network_message(&mut receiver).await? {
+                    NetworkMessage::Control(ProtocolMessage::ExecutionIdProposal {
+                        party_id: proposer_id,
+                        execution_id,
+                    }) => {
+                        // Accept if proposer has lowest ID
+                        if proposer_id == *committee_members.iter().min().unwrap() {
+                            execution_id_coord.propose(proposer_id, execution_id.clone());
+                            broadcast_execution_id_accept(party_id, execution_id).await?;
+                            state = CommitteeState::AwaitingExecutionId;
+                        } else {
+                            println!("Ignoring proposal from non-lowest ID party {}", proposer_id);
+                        }
+                    }
+                    NetworkMessage::Control(ProtocolMessage::CommitteeMemberAnnouncement {
+                        party_id: pid,
+                    }) => {
+                        committee_members.insert(pid);
+                    }
+                    _ => {
+                        // Ignore other messages while waiting for proposal
+                    }
+                }
+            }
+            CommitteeState::AwaitingExecutionId => {
+                // This state is used while waiting for other parties to accept the proposed ID
+                if execution_id_coord.is_agreed(committee_members.len()) {
+                    if let Some(agreed_id) = execution_id_coord.get_agreed_id() {
+                        storage.save("execution_id", &agreed_id)?;
+                        println!("Execution ID established: {:?}", agreed_id);
+                        state = CommitteeState::GeneratingAuxInfo;
+                    }
                 }
             }
             CommitteeState::GeneratingAuxInfo => {
+                let execution_id = storage.load::<String>("execution_id")?;
+
                 // Generate auxiliary info as per CGGMP21
-                let aux_info =
-                    generate_auxiliary_info(party_id, committee_members.len() as u16, &server_addr)
-                        .await?;
+                let aux_info = generate_auxiliary_info(
+                    party_id,
+                    committee_members.len() as u16,
+                    &server_addr,
+                    ExecutionId::new(&execution_id.as_bytes()),
+                )
+                .await?;
                 storage.save("aux_info", &aux_info)?;
 
                 broadcast_aux_info_ready(party_id).await?;
@@ -149,8 +211,15 @@ pub async fn run_committee_mode(
             }
             CommitteeState::GeneratingKeys => {
                 // Perform distributed key generation
-                let key_share =
-                    generate_key_share(party_id, &committee_members, &server_addr).await?;
+                let execution_id = storage.load::<String>("execution_id")?;
+
+                let key_share = generate_key_share(
+                    party_id,
+                    &committee_members,
+                    &server_addr,
+                    ExecutionId::new(&execution_id.as_bytes()),
+                )
+                .await?;
                 storage.save("key_share", &key_share)?;
 
                 broadcast_keygen_ready(party_id).await?;
@@ -175,6 +244,26 @@ pub async fn run_committee_mode(
                 ProtocolMessage::CommitteeMemberAnnouncement { party_id: pid } => {
                     committee_members.insert(pid);
                 }
+                ProtocolMessage::ExecutionIdProposal {
+                    party_id: pid,
+                    execution_id,
+                } => {
+                    if state == CommitteeState::EstablishingExecutionId {
+                        execution_id_coord.propose(pid, execution_id.clone());
+                        // Accept if we haven't proposed our own
+                        if pid < party_id {
+                            broadcast_execution_id_accept(party_id, execution_id).await?;
+                        }
+                    }
+                }
+                ProtocolMessage::ExecutionIdAccept {
+                    party_id: pid,
+                    execution_id,
+                } => {
+                    if state == CommitteeState::EstablishingExecutionId {
+                        execution_id_coord.accept(pid, &execution_id);
+                    }
+                }
                 ProtocolMessage::AuxInfoReady { party_id: pid } => {
                     aux_info_ready.insert(pid);
                 }
@@ -195,6 +284,7 @@ async fn generate_auxiliary_info(
     party_id: u16,
     n_parties: u16,
     server_addr: &str,
+    eid: ExecutionId<'_>,
 ) -> Result<Vec<u8>, Error> {
     println!("Generating auxiliary information for party {}", party_id);
 
@@ -202,11 +292,7 @@ async fn generate_auxiliary_info(
     let delivery =
         WsDelivery::<AuxOnlyMsg<Sha256, SecurityLevel128>>::connect(server_addr, party_id).await?;
 
-    // Prime generation can take a while
     let primes = PregeneratedPrimes::generate(&mut OsRng);
-
-    let eid = ExecutionId::new(b"aux-info-1");
-
     let aux_info = cggmp21::aux_info_gen(eid, party_id, n_parties, primes)
         .start(&mut OsRng, MpcParty::connected(delivery))
         .await
@@ -224,6 +310,7 @@ async fn generate_key_share(
     party_id: u16,
     committee: &HashSet<u16>,
     server_addr: &str,
+    eid: ExecutionId<'_>,
 ) -> Result<Vec<u8>, Error> {
     println!("Starting distributed key generation for party {}", party_id);
 
@@ -235,8 +322,7 @@ async fn generate_key_share(
     .await?;
 
     // Initialize key generation with CGGMP21
-    let keygen_eid = ExecutionId::new(b"keygen-1");
-    let keygen = cggmp21::keygen::<Secp256k1>(keygen_eid, party_id, committee.len() as u16)
+    let keygen = cggmp21::keygen::<Secp256k1>(eid, party_id, committee.len() as u16)
         .set_threshold(3)
         .enforce_reliable_broadcast(true)
         .start(&mut OsRng, MpcParty::connected(delivery))
@@ -321,6 +407,26 @@ async fn broadcast_keygen_ready(party_id: u16) -> Result<(), Error> {
     let (_receiver, sender) = delivery.split();
     sender.broadcast(serialized).await.map_err(Error::Network)?;
 
+    Ok(())
+}
+
+/// Broadcast an execution ID proposal
+async fn broadcast_execution_id_proposal(party_id: u16, execution_id: String) -> Result<(), Error> {
+    let proposal = ProtocolMessage::ExecutionIdProposal {
+        party_id,
+        execution_id,
+    };
+    // ... implement broadcast logic ...
+    Ok(())
+}
+
+/// Broadcast acceptance of an execution ID
+async fn broadcast_execution_id_accept(party_id: u16, execution_id: String) -> Result<(), Error> {
+    let accept = ProtocolMessage::ExecutionIdAccept {
+        party_id,
+        execution_id,
+    };
+    // ... implement broadcast logic ...
     Ok(())
 }
 
@@ -516,4 +622,64 @@ pub async fn handle_signing_requests(storage: &KeyStorage, party_id: u16) -> Res
             handle_signing_request(request, storage, party_id).await?;
         }
     }
+}
+
+/// Execution ID coordination data
+#[derive(Debug)]
+struct ExecutionIdCoordination {
+    /// The proposed execution ID
+    proposed_id: Option<String>,
+    /// The party that proposed the ID
+    proposer: Option<u16>,
+    /// Set of parties that have accepted the proposed ID
+    accepting_parties: HashSet<u16>,
+}
+
+impl ExecutionIdCoordination {
+    fn new() -> Self {
+        Self {
+            proposed_id: None,
+            proposer: None,
+            accepting_parties: HashSet::new(),
+        }
+    }
+
+    fn propose(&mut self, party_id: u16, execution_id: String) {
+        self.proposed_id = Some(execution_id);
+        self.proposer = Some(party_id);
+        self.accepting_parties.clear();
+        self.accepting_parties.insert(party_id); // Proposer automatically accepts
+    }
+
+    fn accept(&mut self, party_id: u16, execution_id: &str) -> bool {
+        if let Some(ref proposed) = self.proposed_id {
+            if proposed == execution_id {
+                self.accepting_parties.insert(party_id);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_agreed(&self, total_parties: usize) -> bool {
+        self.accepting_parties.len() == total_parties
+    }
+
+    fn get_agreed_id(&self) -> Option<String> {
+        if self.proposed_id.is_some() && !self.accepting_parties.is_empty() {
+            self.proposed_id.clone()
+        } else {
+            None
+        }
+    }
+}
+
+/// Generate a unique execution ID
+fn generate_unique_execution_id() -> String {
+    // Combine timestamp and UUID for uniqueness
+    format!(
+        "{}-{}",
+        chrono::Utc::now().timestamp(),
+        uuid::Uuid::new_v4()
+    )
 }
