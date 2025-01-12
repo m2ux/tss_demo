@@ -293,26 +293,24 @@ where
 
         let (mut write, read) = ws_stream.split();
 
-        // Channel for receiving WebSocket messages
-        let (rx_tx, rx_rx) = unbounded();
-
-        // Channel for sending WebSocket messages
-        let (tx_tx, mut tx_rx) = unbounded();  // This is the sender stored in WsSender
-
         // Handle incoming WebSocket messages
-        let rx_tx_clone = rx_tx.clone();
+        let (ws_rcvr_tx, ws_rcvr_rx) = unbounded();
         tokio::spawn(async move {
             let mut read = read;
             while let Some(msg) = read.next().await {
                 if let Ok(Message::Binary(data)) = msg {
-                    let _ = rx_tx_clone.unbounded_send(data);
+                    let _ = ws_rcvr_tx.unbounded_send(data);
+                }
+                else {
+                    println!("Unexpected message: {:?}", msg);
                 }
             }
         });
 
-        // Handle outgoing WebSocket messages
+        // Handle outgoing WebSocket messages from WsSender
+        let (ws_sender_tx, mut ws_sender_rx) = unbounded();  // This is the sender stored in WsSender
         tokio::spawn(async move {
-            while let Some(data) = tx_rx.next().await {  // Receives messages from WsSender
+            while let Some(data) = ws_sender_rx.next().await {
                 if let Err(e) = write.send(Message::Binary(data)).await {
                     println!("Error sending WebSocket message: {}", e);
                     break;
@@ -322,12 +320,12 @@ where
 
         Ok(Self {
             sender: WsSender {
-                sender: tx_tx,
+                sender: ws_sender_tx,
                 party_id,
                 _phantom: PhantomData,
             },
             receiver: WsReceiver {
-                receiver: rx_rx,
+                receiver: ws_rcvr_rx,
                 message_state: MessageState::new(),
                 _phantom: PhantomData,
             },

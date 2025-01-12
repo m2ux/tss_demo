@@ -67,7 +67,7 @@
 
 use crate::network::{WireMessage};
 use crate::protocol::{NetworkMessage,ProtocolMessage};
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use futures::channel::{mpsc, mpsc::unbounded};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
@@ -269,7 +269,8 @@ impl WsServer {
         clients: Arc<RwLock<HashMap<u16, ClientSession>>>,
     ) -> Result<(), ServerError> {
         let ws_stream = accept_async(stream).await?;
-        let (mut _ws_sender, mut ws_receiver) = ws_stream.split();
+        let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+        let (tx, mut rx) = unbounded();
 
         println!("handle messages");
 
@@ -288,9 +289,6 @@ impl WsServer {
                                         "Party ID already registered".into(),
                                     ));
                                 }
-
-                                // Create message channel for this client
-                                let (tx, mut _rx) = mpsc::unbounded();
 
                                 clients_lock.insert(
                                     party_id,
@@ -363,6 +361,16 @@ impl WsServer {
                 }
             }
             println!("Receiver loop ended for party {}", party_id);
+        });
+
+        // Forward messages from channel to WebSocket
+        let _sender_handle = tokio::spawn(async move {
+            while let Some(msg) = rx.next().await {
+                if let Err(e) = ws_sender.send(msg).await {
+                    println!("Failed to send message to party {}: {}", party_id, e);
+                    break;
+                }
+            }
         });
 
         // Connection ended but registration remains
@@ -441,6 +449,7 @@ impl WsServer {
                 println!("Broadcasting protocol message from {}", sender_id);
                 for (id, session) in clients_lock.iter() {
                     if *id != sender_id {
+                        println!("Broadcasting to {}", *id);
                         let encoded = bincode::serialize(&wire_msg)
                             .expect("Failed to serialize wire message");
                         let _ = session.sender.unbounded_send(Message::Binary(encoded));
