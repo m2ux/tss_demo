@@ -484,12 +484,13 @@ pub async fn discover_committee_members() -> Result<HashSet<u16>, Error> {
     // Split into receiver and sender
     let (mut receiver, sender) = delivery.split();
 
-    // Create request for committee state
-    let request = ProtocolMessage::CommitteeMemberAnnouncement { party_id: 0 };
-
-    // Serialize and send request
-    let serialized = bincode::serialize(&request).map_err(Error::Serialization)?;
-    sender.broadcast(serialized).await.map_err(Error::Network)?;
+    sender
+        .broadcast(
+            bincode::serialize(&ProtocolMessage::CommitteeMemberAnnouncement { party_id: 0 })
+                .map_err(Error::Serialization)?,
+        )
+        .await
+        .map_err(Error::Network)?;
 
     // Initialize committee set
     let mut committee = HashSet::new();
