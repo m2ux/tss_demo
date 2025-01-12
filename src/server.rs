@@ -67,12 +67,13 @@
 
 use crate::network::{WireMessage};
 use crate::protocol::{NetworkMessage,ProtocolMessage};
-use futures::{channel::mpsc::{UnboundedSender, unbounded},SinkExt, StreamExt};
+use futures::StreamExt;
+use futures::channel::{mpsc, mpsc::unbounded};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{mpsc, RwLock},
+    sync::RwLock,
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{error, info, warn};
@@ -289,7 +290,7 @@ impl WsServer {
                                 }
 
                                 // Create message channel for this client
-                                let (tx, mut _rx) = mpsc::unbounded_channel();
+                                let (tx, mut _rx) = mpsc::unbounded();
 
                                 clients_lock.insert(
                                     party_id,
@@ -409,7 +410,7 @@ impl WsServer {
             if *id != sender_id {
                 let encoded = bincode::serialize(&msg)
                     .expect("Failed to serialize control message");
-                let _ = session.sender.send(Message::Binary(encoded));
+                let _ = session.sender.unbounded_send(Message::Binary(encoded));
             }
         }
     }
@@ -430,7 +431,7 @@ impl WsServer {
                 if let Some(session) = clients_lock.get(&receiver_id) {
                     let encoded = bincode::serialize(&wire_msg)
                         .expect("Failed to serialize wire message");
-                    let _ = session.sender.send(Message::Binary(encoded));
+                    let _ = session.sender.unbounded_send(Message::Binary(encoded));
                 } else {
                     println!("Recipient {} not found for P2P message", receiver_id);
                 }
@@ -442,7 +443,7 @@ impl WsServer {
                     if *id != sender_id {
                         let encoded = bincode::serialize(&wire_msg)
                             .expect("Failed to serialize wire message");
-                        let _ = session.sender.send(Message::Binary(encoded));
+                        let _ = session.sender.unbounded_send(Message::Binary(encoded));
                     }
                 }
             }

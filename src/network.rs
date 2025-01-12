@@ -30,8 +30,7 @@
 //! ```
 
 use crate::server::ServerMessage;
-use futures::channel::mpsc;
-use futures::channel::mpsc::unbounded;
+use futures::channel::{mpsc, mpsc::unbounded};
 use futures::{stream::SplitStream, Sink, SinkExt, Stream, StreamExt};
 use round_based::{Delivery, MessageDestination};
 use serde::{Deserialize, Serialize};

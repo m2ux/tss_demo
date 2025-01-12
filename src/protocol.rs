@@ -162,6 +162,10 @@ pub async fn run_committee_mode(
     let mut protocol = Protocol::new(party_id);
 
     //broadcast_committee_announcement(sender.clone(), party_id).await?;
+    broadcast_committee_announcement(sender.clone(), party_id).await?;
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    broadcast_committee_announcement(sender.clone(), party_id).await?;
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
     // Committee initialization phase
     loop {
@@ -273,8 +277,8 @@ pub async fn run_committee_mode(
         }
 
         // Process incoming messages
-        match try_receive_network_message(&mut receiver) {
-            Ok(Some(msg)) => {
+        match receive_network_message(&mut receiver).await {
+            Ok(msg) => {
                 match msg {
                     NetworkMessage::Control(msg) => match msg {
                         ProtocolMessage::CommitteeMemberAnnouncement { party_id: pid } => {
@@ -309,10 +313,6 @@ pub async fn run_committee_mode(
                         // Handle protocol-specific messages (TBD)
                     }
                 }
-            }
-            Ok(None) => {
-            // No message available, add a small delay before next check
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
             Err(e) => {
                 eprintln!("Error receiving message: {}", e);
