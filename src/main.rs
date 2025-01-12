@@ -59,6 +59,7 @@ mod protocol;
 mod server;
 mod service;
 mod storage;
+mod committee;
 
 use cggmp21::{
     keygen::ThresholdMsg, security_level::SecurityLevel128, supported_curves::Secp256k1,
