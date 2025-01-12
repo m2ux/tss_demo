@@ -356,7 +356,7 @@ where
 
         Ok(())
     }
-
+/*
     /// Unregisters this party from the ws server
     pub async fn unregister(&self) -> Result<(), NetworkError> {
         let unreg_msg = ServerMessage::Unregister {
@@ -371,7 +371,7 @@ where
             .map_err(|_| NetworkError::ChannelClosed)?;
 
         Ok(())
-    }
+    }*/
 }
 
 /// Handles the WebSocket read stream

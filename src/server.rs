@@ -65,8 +65,9 @@
 //! * Message serialization errors
 //! * Client registration conflicts
 
-use crate::network::{ClientRegistration, WireMessage};
-use futures::{SinkExt, StreamExt};
+use crate::network::{WireMessage};
+use crate::protocol::{NetworkMessage,ProtocolMessage};
+use futures::{channel::mpsc::{UnboundedSender, unbounded},SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
@@ -279,7 +280,6 @@ impl WsServer {
                     if let Message::Binary(data) = msg {
                         match bincode::deserialize::<ServerMessage>(&data) {
                             Ok(ServerMessage::Register { party_id }) => {
-                                println!("rx register message");
                                 // Handle registration
                                 let mut clients_lock = clients.write().await;
                                 if clients_lock.contains_key(&party_id) {
@@ -299,20 +299,18 @@ impl WsServer {
                                     },
                                 );
 
-                                info!("Registered client with party ID: {}", party_id);
+                                println!("Registered client with party ID: {}", party_id);
                                 break party_id;
                             }
                             Ok(ServerMessage::Unregister { party_id }) => {
-                                println!("rx unregister message");
                                 let mut clients_lock = clients.write().await;
                                 if clients_lock.remove(&party_id).is_some() {
-                                    info!("Unregistered client with party ID: {}", party_id);
+                                    println!("Unregistered client with party ID: {}", party_id);
                                 }
                                 return Ok(());
                             }
                             Ok(ServerMessage::Protocol(_)) => {
-                                println!("rx premature protocol message");
-                                warn!(
+                                println!(
                                     "Received protocol message before registration from {}",
                                     addr
                                 );
@@ -334,94 +332,120 @@ impl WsServer {
             }
         };
 
-        // Handle incoming messages until connection closes
-        while let Some(Ok(msg)) = ws_receiver.next().await {
-            if let Message::Binary(data) = msg {
-                match bincode::deserialize::<ServerMessage>(&data) {
-                    Ok(ServerMessage::Unregister { party_id: pid }) => {
-                        println!("rx unregister message");
-                        if pid == party_id {
-                            let mut clients_lock = clients.write().await;
-                            if clients_lock.remove(&party_id).is_some() {
-                                info!("Unregistered client with party ID: {}", party_id);
-                            }
-                            break;
-                        }
+
+        // Handle incoming messages
+        let clients_for_receiver = Arc::clone(&clients);
+        let _receiver_handle = tokio::spawn(async move {
+            while let Some(Ok(msg)) = ws_receiver.next().await {
+                if let Message::Binary(data) = msg {
+                    //println!("Received binary message from party {}", party_id);
+
+                    // Try to deserialize as ServerMessage first
+                    if let Ok(server_msg) = bincode::deserialize::<ServerMessage>(&data) {
+                        Self::handle_server_message(party_id, server_msg, &clients_for_receiver).await;
+                        continue;
                     }
-                    Ok(ServerMessage::Protocol(protocol_data)) => {
-                        println!("rx protocol message");
-                        Self::handle_protocol_message(party_id, protocol_data, &clients).await;
+
+                    // Try to deserialize as ControlMessage
+                    if let Ok(control_msg) = bincode::deserialize::<ProtocolMessage>(&data) {
+                        Self::handle_control_message(party_id, control_msg, &clients_for_receiver).await;
+                        continue;
                     }
-                    _ => {
-                        println!("Unexpected message type from party {}", party_id);
+
+                    // Try to deserialize as WireMessage (Protocol Message)
+                    if let Ok(wire_msg) = bincode::deserialize::<WireMessage>(&data) {
+                        Self::handle_protocol_message(party_id, wire_msg, &clients_for_receiver).await;
+                        continue;
                     }
+
+                    println!("Unable to deserialize message from party {}", party_id);
                 }
             }
-        }
+            println!("Receiver loop ended for party {}", party_id);
+        });
 
         // Connection ended but registration remains
-        info!(
+        println!(
             "Connection closed for party {}, but registration maintained",
             party_id
         );
         Ok(())
     }
 
-    /// Handles protocol message routing and delivery.
-    ///
-    /// This method processes incoming messages and routes them to the appropriate
-    /// recipients based on the message type (P2P or broadcast).
-    ///
-    /// # Arguments
-    ///
-    /// * `sender_id` - Party ID of the message sender
-    /// * `data` - Raw message data
-    /// * `clients` - Shared registry of connected clients
-    ///
-    /// # Message Routing
-    ///
-    /// * P2P messages are sent only to the specified recipient
-    /// * Broadcast messages are sent to all parties except the sender
-    /// * Messages to unknown recipients are logged as warnings
-    ///
-    /// # Error Handling
-    ///
-    /// * Deserialize failures are logged but don't terminate the connection
-    /// * Delivery failures to specific clients are logged as warnings
-    async fn handle_protocol_message(
+    /// Handles server-specific messages
+    async fn handle_server_message(
         sender_id: u16,
-        data: Vec<u8>,
+        msg: ServerMessage,
         clients: &Arc<RwLock<HashMap<u16, ClientSession>>>,
     ) {
-        // Attempt to deserialize the protocol message
-        if let Ok(wire_msg) = bincode::deserialize::<WireMessage>(&data) {
-            let clients_lock = clients.read().await;
+        println!("Handling server message from party {}", sender_id);
+        match msg {
+            ServerMessage::Register { party_id } => {
+                println!("Received registration message from party {}", party_id);
+                // Registration is handled in handle_connection
+            },
+            ServerMessage::Unregister { party_id } => {
+                println!("Received unregister message from party {}", party_id);
+                let mut clients_lock = clients.write().await;
+                clients_lock.remove(&party_id);
+            },
+            _ => {
+                println!("Received unrecognised server message");
+            }
+        }
+    }
 
-            match wire_msg.receiver {
-                // P2P message
-                Some(receiver_id) => {
-                    println!("send single message");
-                    if let Some(session) = clients_lock.get(&receiver_id) {
-                        let _ = session.sender.send(Message::Binary(data));
-                    } else {
-                        warn!("Recipient {} not found for P2P message", receiver_id);
-                    }
+    /// Handles control messages (committee coordination)
+    async fn handle_control_message(
+        sender_id: u16,
+        msg: ProtocolMessage,
+        clients: &Arc<RwLock<HashMap<u16, ClientSession>>>,
+    ) {
+        println!("Handling control message from party {}", sender_id);
+        let clients_lock = clients.read().await;
+
+        // Broadcast control message to all parties
+        for (id, session) in clients_lock.iter() {
+            if *id != sender_id {
+                let encoded = bincode::serialize(&msg)
+                    .expect("Failed to serialize control message");
+                let _ = session.sender.send(Message::Binary(encoded));
+            }
+        }
+    }
+
+    /// Handles protocol messages (CGGMP21 protocol messages)
+    async fn handle_protocol_message(
+        sender_id: u16,
+        wire_msg: WireMessage,
+        clients: &Arc<RwLock<HashMap<u16, ClientSession>>>,
+    ) {
+        //println!("Handling protocol message from party {}", sender_id);
+        let clients_lock = clients.read().await;
+
+        match wire_msg.receiver {
+            // P2P message
+            Some(receiver_id) => {
+                println!("P2P message from {} to {}", sender_id, receiver_id);
+                if let Some(session) = clients_lock.get(&receiver_id) {
+                    let encoded = bincode::serialize(&wire_msg)
+                        .expect("Failed to serialize wire message");
+                    let _ = session.sender.send(Message::Binary(encoded));
+                } else {
+                    println!("Recipient {} not found for P2P message", receiver_id);
                 }
-                // Broadcast message
-                None => {
-                    println!("send broadcast message");
-                    for (id, session) in clients_lock.iter() {
-                        if *id != sender_id {
-                            let _ = session.sender.send(Message::Binary(data.clone()));
-                        }
+            },
+            // Broadcast message
+            None => {
+                println!("Broadcasting protocol message from {}", sender_id);
+                for (id, session) in clients_lock.iter() {
+                    if *id != sender_id {
+                        let encoded = bincode::serialize(&wire_msg)
+                            .expect("Failed to serialize wire message");
+                        let _ = session.sender.send(Message::Binary(encoded));
                     }
                 }
             }
-        } else {
-            println!(
-                "Failed to deserialize protocol message from party {}",
-                sender_id
-            );
         }
     }
 }

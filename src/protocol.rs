@@ -64,7 +64,7 @@ enum CommitteeState {
 ///
 /// These messages handle committee formation, state synchronization, and signing operations
 #[derive(Serialize, Deserialize, Debug)]
-enum ProtocolMessage {
+pub enum ProtocolMessage {
     /// Sent by a party to announce their presence and join the committee
     /// - party_id: Unique identifier of the announcing party
     CommitteeMemberAnnouncement { party_id: u16 },
@@ -110,7 +110,7 @@ enum ProtocolMessage {
 ///
 /// Generic parameter M represents the type of protocol-specific message
 #[derive(Debug)]
-enum NetworkMessage<M> {
+pub enum NetworkMessage<M> {
     /// Messages specific to the underlying cryptographic protocol
     /// Contains structured data of type round_based::Incoming<M>
     Protocol(round_based::Incoming<M>),
@@ -161,7 +161,7 @@ pub async fn run_committee_mode(
     // Initialize protocol
     let mut protocol = Protocol::new(party_id);
 
-    broadcast_committee_announcement(sender.clone(), party_id).await?;
+    //broadcast_committee_announcement(sender.clone(), party_id).await?;
 
     // Committee initialization phase
     loop {
@@ -171,8 +171,8 @@ pub async fn run_committee_mode(
                     println!("All committee members present. Establishing execution ID.");
                     protocol.committee_state = CommitteeState::EstablishingExecutionId;
                 } else {
+                    broadcast_committee_announcement(sender.clone(), party_id).await?;
                     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                    //broadcast_committee_announcement(sender.clone(), party_id).await?;
                 }
             }
             CommitteeState::EstablishingExecutionId => {
