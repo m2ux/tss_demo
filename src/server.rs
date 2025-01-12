@@ -76,6 +76,33 @@ use tokio::{
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{error, info, warn};
 
+/// Errors that can occur during server operation.
+///
+/// This enum encompasses all error conditions that may arise during server
+/// operation, including network errors, protocol violations, and client
+/// registration issues.
+///
+/// # Error Handling
+///
+/// Errors are propagated to the appropriate error handling layer:
+/// * Connection-level errors trigger client disconnection
+/// * Protocol errors are logged and may trigger connection termination
+/// * Registration errors prevent client connection establishment
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {
+    /// Network-related errors (e.g., bind failure, connection errors)
+    #[error("Network error: {0}")]
+    Network(#[from] std::io::Error),
+
+    /// WebSocket protocol errors (e.g., handshake failure, invalid frames)
+    #[error("WebSocket error: {0}")]
+    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+
+    /// Client registration errors (e.g., duplicate party ID, invalid format)
+    #[error("Client registration error: {0}")]
+    Registration(String),
+}
+
 /// Message types for server-client communication
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ServerMessage {
@@ -129,33 +156,6 @@ pub struct WsServer {
     clients: Arc<RwLock<HashMap<u16, ClientSession>>>,
     /// Socket address the server is bound to
     addr: String,
-}
-
-/// Errors that can occur during server operation.
-///
-/// This enum encompasses all error conditions that may arise during server
-/// operation, including network errors, protocol violations, and client
-/// registration issues.
-///
-/// # Error Handling
-///
-/// Errors are propagated to the appropriate error handling layer:
-/// * Connection-level errors trigger client disconnection
-/// * Protocol errors are logged and may trigger connection termination
-/// * Registration errors prevent client connection establishment
-#[derive(Debug, thiserror::Error)]
-pub enum ServerError {
-    /// Network-related errors (e.g., bind failure, connection errors)
-    #[error("Network error: {0}")]
-    Network(#[from] std::io::Error),
-
-    /// WebSocket protocol errors (e.g., handshake failure, invalid frames)
-    #[error("WebSocket error: {0}")]
-    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
-
-    /// Client registration errors (e.g., duplicate party ID, invalid format)
-    #[error("Client registration error: {0}")]
-    Registration(String),
 }
 
 impl WsServer {
@@ -269,13 +269,17 @@ impl WsServer {
         let ws_stream = accept_async(stream).await?;
         let (mut _ws_sender, mut ws_receiver) = ws_stream.split();
 
+        println!("handle messages");
+
         // Wait for registration or other message
+
         let party_id = loop {
             match ws_receiver.next().await {
                 Some(Ok(msg)) => {
                     if let Message::Binary(data) = msg {
                         match bincode::deserialize::<ServerMessage>(&data) {
                             Ok(ServerMessage::Register { party_id }) => {
+                                println!("rx register message");
                                 // Handle registration
                                 let mut clients_lock = clients.write().await;
                                 if clients_lock.contains_key(&party_id) {
@@ -299,6 +303,7 @@ impl WsServer {
                                 break party_id;
                             }
                             Ok(ServerMessage::Unregister { party_id }) => {
+                                println!("rx unregister message");
                                 let mut clients_lock = clients.write().await;
                                 if clients_lock.remove(&party_id).is_some() {
                                     info!("Unregistered client with party ID: {}", party_id);
@@ -306,6 +311,7 @@ impl WsServer {
                                 return Ok(());
                             }
                             Ok(ServerMessage::Protocol(_)) => {
+                                println!("rx premature protocol message");
                                 warn!(
                                     "Received protocol message before registration from {}",
                                     addr
@@ -313,7 +319,7 @@ impl WsServer {
                                 continue;
                             }
                             Err(e) => {
-                                warn!("Failed to deserialize message from {}: {}", addr, e);
+                                println!("Failed to deserialize message from {}: {}", addr, e);
                                 continue;
                             }
                         }
@@ -333,6 +339,7 @@ impl WsServer {
             if let Message::Binary(data) = msg {
                 match bincode::deserialize::<ServerMessage>(&data) {
                     Ok(ServerMessage::Unregister { party_id: pid }) => {
+                        println!("rx unregister message");
                         if pid == party_id {
                             let mut clients_lock = clients.write().await;
                             if clients_lock.remove(&party_id).is_some() {
@@ -342,10 +349,11 @@ impl WsServer {
                         }
                     }
                     Ok(ServerMessage::Protocol(protocol_data)) => {
+                        println!("rx protocol message");
                         Self::handle_protocol_message(party_id, protocol_data, &clients).await;
                     }
                     _ => {
-                        warn!("Unexpected message type from party {}", party_id);
+                        println!("Unexpected message type from party {}", party_id);
                     }
                 }
             }
@@ -392,6 +400,7 @@ impl WsServer {
             match wire_msg.receiver {
                 // P2P message
                 Some(receiver_id) => {
+                    println!("send single message");
                     if let Some(session) = clients_lock.get(&receiver_id) {
                         let _ = session.sender.send(Message::Binary(data));
                     } else {
@@ -400,6 +409,7 @@ impl WsServer {
                 }
                 // Broadcast message
                 None => {
+                    println!("send broadcast message");
                     for (id, session) in clients_lock.iter() {
                         if *id != sender_id {
                             let _ = session.sender.send(Message::Binary(data.clone()));
@@ -408,7 +418,7 @@ impl WsServer {
                 }
             }
         } else {
-            error!(
+            println!(
                 "Failed to deserialize protocol message from party {}",
                 sender_id
             );

@@ -153,10 +153,15 @@ pub async fn run_committee_mode(
     println!("Starting in committee mode with party ID: {}", party_id);
 
     let server_addr = delivery.addr().to_string();
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    delivery.register().await?;
+
     let (mut receiver, sender) = delivery.split();
 
     // Initialize protocol
     let mut protocol = Protocol::new(party_id);
+
+    broadcast_committee_announcement(sender.clone(), party_id).await?;
 
     // Committee initialization phase
     loop {
@@ -166,8 +171,8 @@ pub async fn run_committee_mode(
                     println!("All committee members present. Establishing execution ID.");
                     protocol.committee_state = CommitteeState::EstablishingExecutionId;
                 } else {
-                    broadcast_committee_announcement(sender.clone(), party_id).await?;
                     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    //broadcast_committee_announcement(sender.clone(), party_id).await?;
                 }
             }
             CommitteeState::EstablishingExecutionId => {

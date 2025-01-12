@@ -31,7 +31,8 @@
 
 use crate::server::ServerMessage;
 use futures::channel::mpsc;
-use futures::{stream::SplitStream, Sink, Stream, StreamExt};
+use futures::channel::mpsc::unbounded;
+use futures::{stream::SplitStream, Sink, SinkExt, Stream, StreamExt};
 use round_based::{Delivery, MessageDestination};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -291,21 +292,43 @@ where
             .await
             .map_err(NetworkError::WebSocket)?;
 
-        let (_write, read) = ws_stream.split();
+        let (mut write, read) = ws_stream.split();
 
-        let (tx, rx) = mpsc::unbounded();
+        // Channel for receiving WebSocket messages
+        let (rx_tx, rx_rx) = unbounded();
 
-        // Spawn task to handle incoming messages
-        tokio::spawn(handle_websocket_read(read, tx.clone()));
+        // Channel for sending WebSocket messages
+        let (tx_tx, mut tx_rx) = unbounded();  // This is the sender stored in WsSender
+
+        // Handle incoming WebSocket messages
+        let rx_tx_clone = rx_tx.clone();
+        tokio::spawn(async move {
+            let mut read = read;
+            while let Some(msg) = read.next().await {
+                if let Ok(Message::Binary(data)) = msg {
+                    let _ = rx_tx_clone.unbounded_send(data);
+                }
+            }
+        });
+
+        // Handle outgoing WebSocket messages
+        tokio::spawn(async move {
+            while let Some(data) = tx_rx.next().await {  // Receives messages from WsSender
+                if let Err(e) = write.send(Message::Binary(data)).await {
+                    println!("Error sending WebSocket message: {}", e);
+                    break;
+                }
+            }
+        });
 
         Ok(Self {
             sender: WsSender {
-                sender: tx,
+                sender: tx_tx,
                 party_id,
                 _phantom: PhantomData,
             },
             receiver: WsReceiver {
-                receiver: rx,
+                receiver: rx_rx,
                 message_state: MessageState::new(),
                 _phantom: PhantomData,
             },
@@ -488,6 +511,9 @@ where
     }
 }
 
+// Explicitly implement Unpin for WsReceiver
+impl<M> Unpin for WsReceiver<M> {}
+
 /// Implements the Stream trait for WebSocket message receiving.
 ///
 /// This implementation provides an asynchronous message receiving interface that:
@@ -549,18 +575,17 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        let receiver = unsafe { &mut self.as_mut().get_unchecked_mut().receiver };
-        let poll_result = Pin::new(receiver).poll_next(cx);
-        let message_state = unsafe { &mut self.get_unchecked_mut().message_state };
+        let poll_result = Pin::new(&mut self.receiver).poll_next(cx);
+        let message_state = &mut self.message_state;
 
         match poll_result {
             std::task::Poll::Ready(Some(data)) => {
                 // Deserialize ServerMessage first
                 let server_msg: ServerMessage = match bincode::deserialize(&data) {
                     Ok(msg) => msg,
-                    Err(_) => {
+                    Err(e) => {
                         return std::task::Poll::Ready(Some(Err(NetworkError::Connection(
-                            "Failed to deserialize server message".into(),
+                            format!("Failed to deserialize server message. {}", e).into(),
                         ))))
                     }
                 };
