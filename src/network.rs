@@ -235,7 +235,7 @@ pub struct WsReceiver<M> {
 /// Internal message format for wire transmission.
 ///
 /// Encapsulates all necessary metadata for message delivery and ordering.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct WireMessage {
     /// Monotonically increasing message identifier
     pub id: u64,

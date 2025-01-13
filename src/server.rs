@@ -66,7 +66,6 @@
 //! * Client registration conflicts
 
 use crate::network::{WireMessage};
-use crate::protocol::{NetworkMessage,ProtocolMessage};
 use futures::{SinkExt, StreamExt};
 use futures::channel::{mpsc, mpsc::unbounded};
 use serde::{Deserialize, Serialize};
@@ -272,10 +271,7 @@ impl WsServer {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         let (tx, mut rx) = unbounded();
 
-        println!("handle messages");
-
         // Wait for registration or other message
-
         let party_id = loop {
             match ws_receiver.next().await {
                 Some(Ok(msg)) => {
@@ -337,17 +333,11 @@ impl WsServer {
         let _receiver_handle = tokio::spawn(async move {
             while let Some(Ok(msg)) = ws_receiver.next().await {
                 if let Message::Binary(data) = msg {
-                    //println!("Received binary message from party {}", party_id);
+                    println!("Received binary message from party {}", party_id);
 
-                    // Try to deserialize as ServerMessage first
+                    // Try to deserialize as ServerMessage
                     if let Ok(server_msg) = bincode::deserialize::<ServerMessage>(&data) {
                         Self::handle_server_message(party_id, server_msg, &clients_for_receiver).await;
-                        continue;
-                    }
-
-                    // Try to deserialize as ControlMessage
-                    if let Ok(control_msg) = bincode::deserialize::<ProtocolMessage>(&data) {
-                        Self::handle_control_message(party_id, control_msg, &clients_for_receiver).await;
                         continue;
                     }
 
@@ -404,32 +394,13 @@ impl WsServer {
         }
     }
 
-    /// Handles control messages (committee coordination)
-    async fn handle_control_message(
-        sender_id: u16,
-        msg: ProtocolMessage,
-        clients: &Arc<RwLock<HashMap<u16, ClientSession>>>,
-    ) {
-        println!("Handling control message from party {}", sender_id);
-        let clients_lock = clients.read().await;
-
-        // Broadcast control message to all parties
-        for (id, session) in clients_lock.iter() {
-            if *id != sender_id {
-                let encoded = bincode::serialize(&msg)
-                    .expect("Failed to serialize control message");
-                let _ = session.sender.unbounded_send(Message::Binary(encoded));
-            }
-        }
-    }
-
     /// Handles protocol messages (CGGMP21 protocol messages)
     async fn handle_protocol_message(
         sender_id: u16,
         wire_msg: WireMessage,
         clients: &Arc<RwLock<HashMap<u16, ClientSession>>>,
     ) {
-        //println!("Handling protocol message from party {}", sender_id);
+        println!("Handling protocol message from party {}, {:?}", sender_id, &wire_msg);
         let clients_lock = clients.read().await;
 
         match wire_msg.receiver {

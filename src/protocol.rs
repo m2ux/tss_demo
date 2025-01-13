@@ -64,7 +64,7 @@ enum CommitteeState {
 ///
 /// These messages handle committee formation, state synchronization, and signing operations
 #[derive(Serialize, Deserialize, Debug)]
-pub enum ProtocolMessage {
+pub enum ControlMessage {
     /// Sent by a party to announce their presence and join the committee
     /// - party_id: Unique identifier of the announcing party
     CommitteeMemberAnnouncement { party_id: u16 },
@@ -116,7 +116,7 @@ pub enum NetworkMessage<M> {
     Protocol(round_based::Incoming<M>),
 
     /// Messages for committee coordination and management
-    Control(ProtocolMessage),
+    Control(ControlMessage),
 }
 
 /// Structure representing a committee and its state
@@ -281,11 +281,11 @@ pub async fn run_committee_mode(
             Ok(msg) => {
                 match msg {
                     NetworkMessage::Control(msg) => match msg {
-                        ProtocolMessage::CommitteeMemberAnnouncement { party_id: pid } => {
+                        ControlMessage::CommitteeMemberAnnouncement { party_id: pid } => {
                             protocol.committee_members.insert(pid);
                             println!("New committee member: {}", pid);
                         }
-                        ProtocolMessage::ExecutionIdProposal {
+                        ControlMessage::ExecutionIdProposal {
                             party_id: pid,
                             execution_id,
                         } => {
@@ -293,7 +293,7 @@ pub async fn run_committee_mode(
                                 protocol.execution_id_coord.consider(pid, execution_id);
                             }
                         }
-                        ProtocolMessage::ExecutionIdAccept {
+                        ControlMessage::ExecutionIdAccept {
                             party_id: pid,
                             execution_id,
                         } => {
@@ -301,10 +301,10 @@ pub async fn run_committee_mode(
                                 protocol.execution_id_coord.accept(pid, &execution_id);
                             }
                         }
-                        ProtocolMessage::AuxInfoReady { party_id: pid } => {
+                        ControlMessage::AuxInfoReady { party_id: pid } => {
                             protocol.aux_info_ready.insert(pid);
                         }
-                        ProtocolMessage::KeyGenReady { party_id: pid } => {
+                        ControlMessage::KeyGenReady { party_id: pid } => {
                             protocol.keygen_ready.insert(pid);
                         }
                         _ => {}
@@ -386,7 +386,7 @@ async fn broadcast_committee_announcement(
 
     sender
         .broadcast(
-            bincode::serialize(&ProtocolMessage::CommitteeMemberAnnouncement { party_id })
+            bincode::serialize(&ControlMessage::CommitteeMemberAnnouncement { party_id })
                 .map_err(Error::Serialization)?,
         )
         .await
@@ -406,7 +406,7 @@ async fn broadcast_aux_info_ready(
     );
     sender
         .broadcast(
-            bincode::serialize(&ProtocolMessage::AuxInfoReady { party_id })
+            bincode::serialize(&ControlMessage::AuxInfoReady { party_id })
                 .map_err(Error::Serialization)?,
         )
         .await
@@ -427,7 +427,7 @@ async fn broadcast_keygen_ready(
 
     sender
         .broadcast(
-            bincode::serialize(&ProtocolMessage::KeyGenReady { party_id })
+            bincode::serialize(&ControlMessage::KeyGenReady { party_id })
                 .map_err(Error::Serialization)?,
         )
         .await
@@ -442,7 +442,7 @@ async fn broadcast_execution_id_proposal(
     party_id: u16,
     execution_id: String,
 ) -> Result<(), Error> {
-    let proposal = ProtocolMessage::ExecutionIdProposal {
+    let proposal = ControlMessage::ExecutionIdProposal {
         party_id,
         execution_id,
     };
@@ -462,7 +462,7 @@ async fn broadcast_execution_id_accept(
     party_id: u16,
     execution_id: String,
 ) -> Result<(), Error> {
-    let accept = ProtocolMessage::ExecutionIdAccept {
+    let accept = ControlMessage::ExecutionIdAccept {
         party_id,
         execution_id,
     };
@@ -492,7 +492,7 @@ pub async fn discover_committee_members() -> Result<HashSet<u16>, Error> {
 
     sender
         .broadcast(
-            bincode::serialize(&ProtocolMessage::CommitteeMemberAnnouncement { party_id: 0 })
+            bincode::serialize(&ControlMessage::CommitteeMemberAnnouncement { party_id: 0 })
                 .map_err(Error::Serialization)?,
         )
         .await
@@ -516,14 +516,14 @@ pub async fn discover_committee_members() -> Result<HashSet<u16>, Error> {
                     Ok(incoming) => {
                         // Try to deserialize as ProtocolMessage
                         if let Ok(bytes) = bincode::serialize(&incoming.msg) {
-                            if let Ok(msg) = bincode::deserialize::<ProtocolMessage>(&bytes) {
+                            if let Ok(msg) = bincode::deserialize::<ControlMessage>(&bytes) {
                                 match msg {
-                                    ProtocolMessage::CommitteeMemberAnnouncement { party_id } => {
+                                    ControlMessage::CommitteeMemberAnnouncement { party_id } => {
                                         if party_id != 0 { // Don't include discovery party
                                             committee.insert(party_id);
                                         }
                                     }
-                                    ProtocolMessage::CommitteeState { members, .. } => {
+                                    ControlMessage::CommitteeState { members, .. } => {
                                         committee.extend(members.into_iter());
                                     }
                                     _ => {} // Ignore other message types
@@ -558,7 +558,7 @@ async fn await_signing_request() -> Result<Option<SigningRequest>, Error> {
 
     // Process incoming messages
     match receive_network_message(&mut receiver).await? {
-        NetworkMessage::Control(ProtocolMessage::SigningRequest { message, initiator }) => {
+        NetworkMessage::Control(ControlMessage::SigningRequest { message, initiator }) => {
             Ok(Some(SigningRequest { message, initiator }))
         }
         _ => Ok(None),
@@ -576,7 +576,7 @@ where
         Some(Ok(incoming)) => {
             match bincode::serialize(&incoming.msg) {
                 Ok(bytes) => {
-                    if let Ok(control_msg) = bincode::deserialize::<ProtocolMessage>(&bytes) {
+                    if let Ok(control_msg) = bincode::deserialize::<ControlMessage>(&bytes) {
                         Ok(NetworkMessage::Control(control_msg))
                     } else {
                         // If it's not a control message, return it as a protocol message
@@ -612,7 +612,7 @@ where
                     match bincode::serialize(&incoming.msg) {
                         Ok(bytes) => {
                             // Then try to deserialize as ProtocolMessage
-                            if let Ok(control_msg) = bincode::deserialize::<ProtocolMessage>(&bytes)
+                            if let Ok(control_msg) = bincode::deserialize::<ControlMessage>(&bytes)
                             {
                                 Ok(Some(NetworkMessage::Control(control_msg)))
                             } else {
