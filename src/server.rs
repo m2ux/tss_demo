@@ -327,13 +327,12 @@ impl WsServer {
             }
         };
 
-
         // Handle incoming messages
         let clients_for_receiver = Arc::clone(&clients);
         let _receiver_handle = tokio::spawn(async move {
             while let Some(Ok(msg)) = ws_receiver.next().await {
                 if let Message::Binary(data) = msg {
-                    println!("Received binary message from party {}", party_id);
+                    //println!("Received binary message from party {}", party_id);
 
                     // Try to deserialize as ServerMessage
                     if let Ok(server_msg) = bincode::deserialize::<ServerMessage>(&data) {
@@ -343,7 +342,7 @@ impl WsServer {
 
                     // Try to deserialize as WireMessage (Protocol Message)
                     if let Ok(wire_msg) = bincode::deserialize::<WireMessage>(&data) {
-                        Self::handle_protocol_message(party_id, wire_msg, &clients_for_receiver).await;
+                        Self::handle_client_message(party_id, wire_msg, &clients_for_receiver).await;
                         continue;
                     }
 
@@ -361,13 +360,9 @@ impl WsServer {
                     break;
                 }
             }
+            println!("Sender loop ended for party {}", party_id);
         });
 
-        // Connection ended but registration remains
-        println!(
-            "Connection closed for party {}, but registration maintained",
-            party_id
-        );
         Ok(())
     }
 
@@ -377,7 +372,7 @@ impl WsServer {
         msg: ServerMessage,
         clients: &Arc<RwLock<HashMap<u16, ClientSession>>>,
     ) {
-        println!("Handling server message from party {}", sender_id);
+        //println!("Handling server message from party {}", sender_id);
         match msg {
             ServerMessage::Register { party_id } => {
                 println!("Received registration message from party {}", party_id);
@@ -394,13 +389,13 @@ impl WsServer {
         }
     }
 
-    /// Handles protocol messages (CGGMP21 protocol messages)
-    async fn handle_protocol_message(
+    /// Handles client messages
+    async fn handle_client_message(
         sender_id: u16,
         wire_msg: WireMessage,
         clients: &Arc<RwLock<HashMap<u16, ClientSession>>>,
     ) {
-        println!("Handling protocol message from party {}, {:?}", sender_id, &wire_msg);
+        //println!("Handling client message from party {}, {:?}", sender_id, &wire_msg);
         let clients_lock = clients.read().await;
 
         match wire_msg.receiver {
@@ -417,7 +412,7 @@ impl WsServer {
             },
             // Broadcast message
             None => {
-                println!("Broadcasting protocol message from {}", sender_id);
+                //println!("Broadcasting client message from {}", sender_id);
                 for (id, session) in clients_lock.iter() {
                     if *id != sender_id {
                         println!("Broadcasting to {}", *id);

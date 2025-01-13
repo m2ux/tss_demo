@@ -154,7 +154,7 @@ pub async fn run_committee_mode(
 
     let server_addr = delivery.addr().to_string();
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    delivery.register().await?;
+    let _ = delivery.register();
 
     let (mut receiver, sender) = delivery.split();
 
@@ -590,47 +590,6 @@ where
         None => Err(Error::Network(NetworkError::Connection(
             "Connection closed".into(),
         ))),
-    }
-}
-
-/// Receives and processes incoming network messages without blocking
-fn try_receive_network_message<M>(
-    receiver: &mut network::WsReceiver<M>,
-) -> Result<Option<NetworkMessage<M>>, Error>
-where
-    M: serde::Serialize + for<'de> serde::Deserialize<'de> + Unpin,
-{
-    // Create polling context
-    let waker = futures::task::noop_waker();
-    let mut cx = std::task::Context::from_waker(&waker);
-
-    match Pin::new(receiver).try_poll_next(&mut cx) {
-        std::task::Poll::Ready(Some(msg)) => {
-            match msg {
-                Ok(incoming) => {
-                    // First try to serialize the incoming message
-                    match bincode::serialize(&incoming.msg) {
-                        Ok(bytes) => {
-                            // Then try to deserialize as ProtocolMessage
-                            if let Ok(control_msg) = bincode::deserialize::<ControlMessage>(&bytes)
-                            {
-                                Ok(Some(NetworkMessage::Control(control_msg)))
-                            } else {
-                                // If not a control message, it must be a protocol message
-                                Ok(Some(NetworkMessage::Protocol(incoming)))
-                            }
-                        }
-                        Err(_) => {
-                            // If serialization fails, assume it's a protocol message
-                            Ok(Some(NetworkMessage::Protocol(incoming)))
-                        }
-                    }
-                }
-                Err(e) => Err(Error::Network(e)),
-            }
-        }
-        std::task::Poll::Ready(None) => Ok(None), // Stream ended
-        std::task::Poll::Pending => Ok(None),     // No message available
     }
 }
 

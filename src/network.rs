@@ -339,7 +339,7 @@ where
     }
 
     /// Registers this party with the ws server
-    pub async fn register(&self) -> Result<(), NetworkError> {
+    pub fn register(&self) -> Result<(), NetworkError> {
         let reg_msg = ServerMessage::Register {
             party_id: self.sender.party_id,
         };
@@ -353,9 +353,9 @@ where
 
         Ok(())
     }
-/*
+
     /// Unregisters this party from the ws server
-    pub async fn unregister(&self) -> Result<(), NetworkError> {
+    pub fn unregister(&self) -> Result<(), NetworkError> {
         let unreg_msg = ServerMessage::Unregister {
             party_id: self.sender.party_id,
         };
@@ -368,7 +368,7 @@ where
             .map_err(|_| NetworkError::ChannelClosed)?;
 
         Ok(())
-    }*/
+    }
 }
 
 /// Handles the WebSocket read stream
