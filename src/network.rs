@@ -29,10 +29,12 @@
 //! }
 //! ```
 
+use crate::error::Error;
+use crate::protocol::ControlMessage;
 use crate::server::ServerMessage;
 use futures::channel::{mpsc, mpsc::unbounded};
 use futures::{stream::SplitStream, Sink, SinkExt, Stream, StreamExt};
-use round_based::{Delivery, MessageDestination};
+use round_based::{Delivery, Incoming, MessageDestination, Outgoing};
 use serde::{Deserialize, Serialize};
 use std::{
     marker::PhantomData,
@@ -43,6 +45,19 @@ use std::{
 use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tungstenite::Message;
+
+/// Represents different types of messages that can be exchanged over the network
+///
+/// Generic parameter M represents the type of protocol-specific message
+#[derive(Debug)]
+pub enum NetworkMessage<M> {
+    /// Messages specific to the underlying cryptographic protocol
+    /// Contains structured data of type round_based::Incoming<M>
+    Protocol(round_based::Incoming<M>),
+
+    /// Messages for committee coordination and management
+    Control(ControlMessage),
+}
 
 /// Thread-safe message ID generator with overflow handling.
 ///
@@ -203,12 +218,13 @@ where
     /// # Returns
     ///
     /// Returns Ok(()) on success, or NetworkError on failure
-    pub async fn broadcast(&self, message: Vec<u8>) -> Result<(), NetworkError> {
+    pub async fn broadcast(&self, message: M) -> Result<(), NetworkError> {
         let wire_msg = WireMessage {
             id: MESSAGE_ID_GEN.next_id(),
             sender: self.party_id,
             receiver: None, // None indicates broadcast
-            payload: message,
+            payload: bincode::serialize(&message)
+                .map_err(|_| NetworkError::Connection("Serialization failed".into()))?,
         };
 
         let encoded = bincode::serialize(&wire_msg)
@@ -230,6 +246,12 @@ pub struct WsReceiver<M> {
     receiver: mpsc::UnboundedReceiver<Vec<u8>>,
     message_state: MessageState,
     _phantom: PhantomData<M>,
+}
+
+impl<M> WsReceiver<M> {
+    pub fn into_protocol_receiver(self) -> ProtocolReceiver<M> {
+        ProtocolReceiver(self)
+    }
 }
 
 /// Internal message format for wire transmission.
@@ -300,15 +322,14 @@ where
             while let Some(msg) = read.next().await {
                 if let Ok(Message::Binary(data)) = msg {
                     let _ = ws_rcvr_tx.unbounded_send(data);
-                }
-                else {
+                } else {
                     println!("Unexpected message: {:?}", msg);
                 }
             }
         });
 
         // Handle outgoing WebSocket messages from WsSender
-        let (ws_sender_tx, mut ws_sender_rx) = unbounded();  // This is the sender stored in WsSender
+        let (ws_sender_tx, mut ws_sender_rx) = unbounded(); // This is the sender stored in WsSender
         tokio::spawn(async move {
             while let Some(data) = ws_sender_rx.next().await {
                 if let Err(e) = write.send(Message::Binary(data)).await {
@@ -467,13 +488,8 @@ where
         let encoded = bincode::serialize(&wire_msg)
             .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
 
-        // Wrap in ServerMessage::Protocol
-        let server_msg = ServerMessage::Protocol(encoded);
-        let final_encoded = bincode::serialize(&server_msg)
-            .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
-
         self.sender
-            .unbounded_send(final_encoded)
+            .unbounded_send(encoded)
             .map_err(|_| NetworkError::ChannelClosed)
     }
 
@@ -507,6 +523,9 @@ where
         std::task::Poll::Ready(Ok(()))
     }
 }
+
+/// WsReceiver wrapper for protocol messages
+pub struct ProtocolReceiver<M>(WsReceiver<M>);
 
 // Explicitly implement Unpin for WsReceiver
 impl<M> Unpin for WsReceiver<M> {}
@@ -542,7 +561,7 @@ impl<M> Unpin for WsReceiver<M> {}
 /// - Message IDs are validated to ensure proper sequencing
 /// - Failed message processing results in appropriate NetworkError variants
 /// - The implementation is compatible with async stream combinators
-impl<M> Stream for WsReceiver<M>
+impl<M> Stream for ProtocolReceiver<M>
 where
     M: serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
@@ -572,62 +591,95 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
+        let receiver = &mut self.0;
+        let poll_result = Pin::new(&mut receiver.receiver).poll_next(cx);
+        let message_state = &mut receiver.message_state;
+
+        match poll_result {
+            std::task::Poll::Ready(Some(data)) => {
+                match bincode::deserialize::<WireMessage>(&data) {
+                    Ok(wire_msg) => {
+                        if let Err(e) = message_state.validate_and_update_id(wire_msg.id) {
+                            return std::task::Poll::Ready(Some(Err(e)));
+                        }
+
+                        match bincode::deserialize(&wire_msg.payload) {
+                            Ok(msg) => std::task::Poll::Ready(Some(Ok(round_based::Incoming {
+                                id: wire_msg.id,
+                                sender: wire_msg.sender,
+                                msg,
+                                msg_type: wire_msg
+                                    .receiver
+                                    .map_or(round_based::MessageType::Broadcast, |_| {
+                                        round_based::MessageType::P2P
+                                    }),
+                            }))),
+                            Err(_) => std::task::Poll::Ready(Some(Err(NetworkError::Connection(
+                                "Failed to deserialize protocol message".into(),
+                            )))),
+                        }
+                    }
+                    Err(_) => std::task::Poll::Ready(Some(Err(NetworkError::Connection(
+                        "Failed to deserialize wire message".into(),
+                    )))),
+                }
+            }
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+impl<M> Stream for WsReceiver<M>
+where
+    M: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    type Item = Result<M, NetworkError>;
+
+    /// Attempts to receive the next message from the WebSocket connection.
+    ///
+    /// This method performs the following steps:
+    /// 1. Receives raw data from the channel
+    /// 2. Deserializes the wire format message
+    /// 3. Validates the message ID sequence
+    /// 4. Deserializes the actual message payload
+    ///
+    /// # Returns
+    ///
+    /// - `Poll::Ready(Some(Ok(message)))`: A message was successfully received
+    /// - `Poll::Ready(Some(Err(error)))`: An error occurred while processing the message
+    /// - `Poll::Ready(None)`: The stream has ended (channel closed)
+    /// - `Poll::Pending`: No message is currently available
+    ///
+    /// # Errors
+    ///
+    /// - `NetworkError::Connection`: Message deserialization failed
+    /// - `NetworkError::InvalidMessageId`: Message arrived out of sequence
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
         let poll_result = Pin::new(&mut self.receiver).poll_next(cx);
         let message_state = &mut self.message_state;
 
         match poll_result {
             std::task::Poll::Ready(Some(data)) => {
-                // Deserialize ServerMessage first
-                let server_msg: ServerMessage = match bincode::deserialize(&data) {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        return std::task::Poll::Ready(Some(Err(NetworkError::Connection(
-                            format!("Failed to deserialize server message. {}", e).into(),
-                        ))))
-                    }
-                };
-
-                // Handle protocol message
-                if let ServerMessage::Protocol(protocol_data) = server_msg {
-                    let wire_msg: WireMessage = match bincode::deserialize(&protocol_data) {
-                        Ok(msg) => msg,
-                        Err(_) => {
-                            return std::task::Poll::Ready(Some(Err(NetworkError::Connection(
-                                "Failed to deserialize wire message".into(),
-                            ))))
+                match bincode::deserialize::<WireMessage>(&data) {
+                    Ok(wire_msg) => {
+                        if let Err(e) = message_state.validate_and_update_id(wire_msg.id) {
+                            return std::task::Poll::Ready(Some(Err(e)));
                         }
-                    };
 
-                    // Validate message ID
-                    if let Err(e) = message_state.validate_and_update_id(wire_msg.id) {
-                        return std::task::Poll::Ready(Some(Err(e)));
-                    }
-
-                    // Deserialize protocol message
-                    let message = match bincode::deserialize(&wire_msg.payload) {
-                        Ok(msg) => msg,
-                        Err(_) => {
-                            return std::task::Poll::Ready(Some(Err(NetworkError::Connection(
-                                "Failed to deserialize protocol message".into(),
-                            ))))
+                        match bincode::deserialize(&wire_msg.payload) {
+                            Ok(payload) => std::task::Poll::Ready(Some(Ok(payload))),
+                            Err(_) => std::task::Poll::Ready(Some(Err(NetworkError::Connection(
+                                "Failed to deserialize message".into(),
+                            )))),
                         }
-                    };
-
-                    let msg_type = wire_msg
-                        .to_message_destination()
-                        .map_or(round_based::MessageType::Broadcast, |_| {
-                            round_based::MessageType::P2P
-                        });
-
-                    std::task::Poll::Ready(Some(Ok(round_based::Incoming {
-                        id: wire_msg.id,
-                        sender: wire_msg.sender,
-                        msg: message,
-                        msg_type,
-                    })))
-                } else {
-                    // Ignore non-protocol messages
-                    std::task::Poll::Pending
+                    }
+                    Err(_) => std::task::Poll::Ready(Some(Err(NetworkError::Connection(
+                        "Failed to deserialize wire message".into(),
+                    )))),
                 }
             }
             std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
@@ -673,7 +725,45 @@ where
 /// - The implementation is compatible with the round-based protocol requirements
 impl<M> Delivery<M> for WsDelivery<M>
 where
-    M: serde::Serialize + for<'de> serde::Deserialize<'de> + std::marker::Unpin,
+    M: serde::Serialize + for<'de> serde::Deserialize<'de> + Unpin,
+{
+    type Send = WsSender<M>;
+    type Receive = ProtocolReceiver<M>;
+    type SendError = NetworkError;
+    type ReceiveError = NetworkError;
+
+    /// Splits the delivery instance into separate sender and receiver components.
+    ///
+    /// This method allows for independent use of sending and receiving capabilities,
+    /// which is particularly useful in async contexts where different tasks handle
+    /// sending and receiving.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// - The receiver component for handling incoming messages
+    /// - The sender component for sending outgoing messages
+    fn split(self) -> (Self::Receive, Self::Send) {
+        (self.receiver.into_protocol_receiver(), self.sender)
+    }
+}
+
+pub trait NDelivery<M> {
+    /// Outgoing delivery channel
+    type Send: Sink<Outgoing<M>, Error = Self::SendError> + Unpin;
+    /// Incoming delivery channel
+    type Receive: Stream<Item = Result<M, Self::ReceiveError>> + Unpin;
+    /// Error of outgoing delivery channel
+    type SendError: core::error::Error + Send + Sync + 'static;
+    /// Error of incoming delivery channel
+    type ReceiveError: core::error::Error + Send + Sync + 'static;
+    /// Returns a pair of incoming and outgoing delivery channels
+    fn split(self) -> (Self::Receive, Self::Send);
+}
+
+impl<M> NDelivery<M> for WsDelivery<M>
+where
+    M: serde::Serialize + for<'de> serde::Deserialize<'de> + Unpin,
 {
     type Send = WsSender<M>;
     type Receive = WsReceiver<M>;

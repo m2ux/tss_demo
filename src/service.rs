@@ -9,7 +9,7 @@ use sha2::Sha256;
 
 /// Runs the application in signing-service mode
 pub async fn run_service_mode(
-    _delivery: WsDelivery<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>,
+    _server_addr: String,
     _storage: KeyStorage,
     _party_id: u16,
     message: String,

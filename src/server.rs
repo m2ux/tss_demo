@@ -65,9 +65,9 @@
 //! * Message serialization errors
 //! * Client registration conflicts
 
-use crate::network::{WireMessage};
-use futures::{SinkExt, StreamExt};
+use crate::network::WireMessage;
 use futures::channel::{mpsc, mpsc::unbounded};
+use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
@@ -111,8 +111,6 @@ pub enum ServerMessage {
     Register { party_id: u16 },
     /// Unregister request
     Unregister { party_id: u16 },
-    /// Protocol message
-    Protocol(Vec<u8>),
 }
 
 /// Represents a connected client session in the WebSocket server.
@@ -304,13 +302,6 @@ impl WsServer {
                                 }
                                 return Ok(());
                             }
-                            Ok(ServerMessage::Protocol(_)) => {
-                                println!(
-                                    "Received protocol message before registration from {}",
-                                    addr
-                                );
-                                continue;
-                            }
                             Err(e) => {
                                 println!("Failed to deserialize message from {}: {}", addr, e);
                                 continue;
@@ -336,13 +327,15 @@ impl WsServer {
 
                     // Try to deserialize as ServerMessage
                     if let Ok(server_msg) = bincode::deserialize::<ServerMessage>(&data) {
-                        Self::handle_server_message(party_id, server_msg, &clients_for_receiver).await;
+                        Self::handle_server_message(party_id, server_msg, &clients_for_receiver)
+                            .await;
                         continue;
                     }
 
                     // Try to deserialize as WireMessage (Protocol Message)
                     if let Ok(wire_msg) = bincode::deserialize::<WireMessage>(&data) {
-                        Self::handle_client_message(party_id, wire_msg, &clients_for_receiver).await;
+                        Self::handle_client_message(party_id, wire_msg, &clients_for_receiver)
+                            .await;
                         continue;
                     }
 
@@ -377,14 +370,11 @@ impl WsServer {
             ServerMessage::Register { party_id } => {
                 println!("Received registration message from party {}", party_id);
                 // Registration is handled in handle_connection
-            },
+            }
             ServerMessage::Unregister { party_id } => {
                 println!("Received unregister message from party {}", party_id);
                 let mut clients_lock = clients.write().await;
                 clients_lock.remove(&party_id);
-            },
-            _ => {
-                println!("Received unrecognised server message");
             }
         }
     }
@@ -403,13 +393,13 @@ impl WsServer {
             Some(receiver_id) => {
                 println!("P2P message from {} to {}", sender_id, receiver_id);
                 if let Some(session) = clients_lock.get(&receiver_id) {
-                    let encoded = bincode::serialize(&wire_msg)
-                        .expect("Failed to serialize wire message");
+                    let encoded =
+                        bincode::serialize(&wire_msg).expect("Failed to serialize wire message");
                     let _ = session.sender.unbounded_send(Message::Binary(encoded));
                 } else {
                     println!("Recipient {} not found for P2P message", receiver_id);
                 }
-            },
+            }
             // Broadcast message
             None => {
                 //println!("Broadcasting client message from {}", sender_id);

@@ -53,13 +53,13 @@
 //! * Curve: secp256k1
 //! * Hash function: SHA256
 
+mod committee;
 mod error;
 mod network;
 mod protocol;
 mod server;
 mod service;
 mod storage;
-mod committee;
 
 use cggmp21::{
     keygen::ThresholdMsg, security_level::SecurityLevel128, supported_curves::Secp256k1,
@@ -154,17 +154,13 @@ async fn main() -> Result<(), Error> {
             let storage =
                 KeyStorage::new("keys", "a very secret key that should be properly secured")?;
 
-            // Initialize network connection
-            type Msg = ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>;
-            let delivery = WsDelivery::<Msg>::connect(&args.server, party_id).await?;
-
             // Select operating mode
             match mode {
                 OperationMode::Committee => {
-                    run_committee_mode(delivery, storage, party_id).await?;
+                    run_committee_mode(args.server, storage, party_id).await?;
                 }
                 OperationMode::Service(message) => {
-                    run_service_mode(delivery, storage, party_id, message).await?;
+                    run_service_mode(args.server, storage, party_id, message).await?;
                 }
                 OperationMode::Server => unreachable!(),
             }
