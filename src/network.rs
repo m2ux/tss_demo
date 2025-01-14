@@ -184,7 +184,10 @@ impl MessageState {
 /// Handles sending messages to other parties through the WebSocket connection.
 /// Implements the `Sink` trait for outgoing messages.
 #[derive(Clone)]
-pub struct WsSender<M> {
+pub struct WsSender<M>
+where
+    M: Serialize + for<'de> Deserialize<'de>,
+{
     sender: mpsc::UnboundedSender<Vec<u8>>,
     party_id: u16,
     session_id: u16,
@@ -215,6 +218,41 @@ where
 
         // Use the Sink trait's send method
         self.send(outgoing).await
+    }
+    /// Registers this party with the ws server
+    async fn register(&self) -> Result<(), NetworkError> {
+        let reg_msg = ServerMessage::Register {
+            session: PartySession {
+                party_id: self.party_id,
+                session_id: self.session_id,
+            },
+        };
+        let serialized = bincode::serialize(&reg_msg)
+            .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
+
+        self.sender
+            .unbounded_send(serialized)
+            .map_err(|_| NetworkError::ChannelClosed)?;
+
+        Ok(())
+    }
+}
+
+impl<M> Drop for WsSender<M>
+where
+    M: Serialize + for<'de> Deserialize<'de>,
+{
+    fn drop(&mut self) {
+        let unreg_msg = ServerMessage::Unregister {
+            session: PartySession {
+                party_id: self.party_id,
+                session_id: self.session_id,
+            },
+        };
+
+        if let Ok(encoded) = bincode::serialize(&unreg_msg) {
+            let _ = self.sender.unbounded_send(encoded);
+        }
     }
 }
 
@@ -262,14 +300,17 @@ impl WireMessage {
 ///
 /// Provides the main interface for WebSocket-based network communication,
 /// combining both sending and receiving capabilities.
-pub struct WsDelivery<M> {
+pub struct WsDelivery<M>
+where
+    M: Serialize + for<'de> Deserialize<'de>,
+{
     sender: WsSender<M>,
     receiver: WsReceiver<M>,
 }
 
 impl<M> WsDelivery<M>
 where
-    M: Serialize + for<'de> Deserialize<'de>,
+    M: Serialize + for<'de> Deserialize<'de> + std::marker::Unpin,
 {
     /// Establishes a new WebSocket connection to the specified server.
     ///
@@ -319,69 +360,23 @@ where
             }
         });
 
+        let sender = WsSender {
+            sender: ws_sender_tx,
+            party_id,
+            session_id: session_id.into(),
+            _phantom: PhantomData,
+        };
+        
+        sender.register().await?;
+
         Ok(Self {
-            sender: WsSender {
-                sender: ws_sender_tx,
-                party_id,
-                session_id: session_id.into(),
-                _phantom: PhantomData,
-            },
+            sender,
             receiver: WsReceiver {
                 receiver: ws_rcvr_rx,
                 message_state: MessageState::new(),
                 _phantom: PhantomData,
             },
         })
-    }
-
-    /// Registers this party with the ws server
-    pub fn register(&self) -> Result<(), NetworkError> {
-        let reg_msg = ServerMessage::Register {
-            session: PartySession {
-                party_id: self.sender.party_id,
-                session_id: self.sender.session_id,
-            },
-        };
-        let serialized = bincode::serialize(&reg_msg)
-            .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
-
-        self.sender
-            .sender
-            .unbounded_send(serialized)
-            .map_err(|_| NetworkError::ChannelClosed)?;
-
-        Ok(())
-    }
-
-    /// Unregisters this party from the ws server
-    pub fn unregister(&self) -> Result<(), NetworkError> {
-        let unreg_msg = ServerMessage::Unregister {
-            session: PartySession {
-                party_id: self.sender.party_id,
-                session_id: self.sender.session_id,
-            },
-        };
-        let serialized = bincode::serialize(&unreg_msg)
-            .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
-
-        self.sender
-            .sender
-            .unbounded_send(serialized)
-            .map_err(|_| NetworkError::ChannelClosed)?;
-
-        Ok(())
-    }
-}
-
-/// Handles the WebSocket read stream
-async fn handle_websocket_read(
-    mut read: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
-    tx: mpsc::UnboundedSender<Vec<u8>>,
-) {
-    while let Some(msg) = read.next().await {
-        if let Ok(Message::Binary(data)) = msg {
-            let _ = tx.unbounded_send(data);
-        }
     }
 }
 

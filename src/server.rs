@@ -75,7 +75,6 @@ use tokio::{
     sync::RwLock,
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message};
-use tracing::{error, info, warn};
 
 /// Errors that can occur during server operation.
 ///

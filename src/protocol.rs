@@ -145,7 +145,6 @@ pub async fn run_committee_mode(
             .await?;
 
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    let _ = delivery.register();
 
     // Get sender for all outgoing messages
     let (mut receiver, mut sender) = Delivery::split(delivery);
