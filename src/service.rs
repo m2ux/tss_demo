@@ -5,7 +5,6 @@ use crate::storage::KeyStorage;
 /// Runs the application in signing-service mode
 pub async fn run_service_mode(
     _server_addr: String,
-    _storage: KeyStorage,
     _party_id: u16,
     message: String,
 ) -> Result<(), Error> {

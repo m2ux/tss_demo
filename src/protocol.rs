@@ -59,10 +59,11 @@ enum CommitteeState {
 ///
 /// These messages handle committee formation, state synchronization, and signing operations
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[repr(u8)]
 pub enum ControlMessage {
     /// Sent by a party to announce their presence and join the committee
     /// - party_id: Unique identifier of the announcing party
-    CommitteeMemberAnnouncement,
+    CommitteeMemberAnnouncement = 3,
 
     /// Propose an execution ID for this session
     ExecutionIdProposal { execution_id: String },
@@ -134,10 +135,13 @@ impl Protocol {
 /// Runs the application in committee mode, ie participating in the signing committee
 pub async fn run_committee_mode(
     server_addr: String,
-    storage: KeyStorage,
     party_id: u16,
 ) -> Result<(), Error> {
     println!("Starting in committee mode with party ID: {}", party_id);
+
+    // Initialize storage
+    let storage =
+        KeyStorage::new(format!("keys_{}", party_id), "a very secret key that should be properly secured")?;
 
     // Initialize control message connection
     let delivery =
@@ -169,6 +173,7 @@ pub async fn run_committee_mode(
     });
 
     let mut committee_state = CommitteeState::AwaitingMembers;
+    //println!("Broadcasting presence as committee member {}", party_id);
 
     // Committee initialization phase
     loop {
@@ -180,13 +185,12 @@ pub async fn run_committee_mode(
                     println!("All committee members present. Establishing execution ID.");
                     committee_state = CommitteeState::EstablishingExecutionId;
                 } else {
-                    println!("Broadcasting presence as committee member {}", party_id);
                     sender
                         .broadcast(ControlMessage::CommitteeMemberAnnouncement)
                         .await
                         .map_err(Error::Network)?;
 
-                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 }
             }
             CommitteeState::EstablishingExecutionId => {
@@ -321,8 +325,10 @@ async fn handle_message(
     // Match the message content
     match incoming.msg {
         ControlMessage::CommitteeMemberAnnouncement => {
-            protocol.committee_members.insert(pid);
-            println!("New committee member: {}", pid);
+            if !protocol.committee_members.contains(&pid) {
+                protocol.committee_members.insert(pid);
+                println!("New committee member: {}", pid);
+            }
         }
         ControlMessage::ExecutionIdProposal { execution_id } => {
             protocol.execution_id_coord.consider(pid, execution_id);
@@ -473,6 +479,7 @@ pub async fn discover_committee_members() -> Result<HashSet<u16>, Error> {
 /// Waits for and receives signing requests
 async fn await_signing_request() -> Result<Option<SigningRequest>, Error> {
     println!("Waiting for signing requests...");
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     /*
     // Connect to websocket server
     let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(

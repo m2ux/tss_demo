@@ -119,7 +119,7 @@ pub enum NetworkError {
 /// assert!(state.validate_and_update_id(1).is_err());
 /// ```
 #[derive(Debug)]
-struct MessageState {
+pub struct MessageState {
     /// The last successfully validated message ID, wrapped to handle overflow
     last_id: Wrapping<u64>,
 }
@@ -130,7 +130,7 @@ impl MessageState {
     /// # Returns
     ///
     /// Returns a new MessageState instance initialized with a message ID of 0.
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             last_id: Wrapping(0),
         }
@@ -163,7 +163,7 @@ impl MessageState {
     /// // Invalid - out of sequence
     /// assert!(state.validate_and_update_id(1).is_err());
     /// ```
-    fn validate_and_update_id(&mut self, id: u64) -> Result<(), NetworkError> {
+    pub fn validate_and_update_id(&mut self, id: u64) -> Result<(), NetworkError> {
         let current = self.last_id;
         let new_id = Wrapping(id);
 
@@ -366,7 +366,7 @@ where
             session_id: session_id.into(),
             _phantom: PhantomData,
         };
-        
+
         sender.register().await?;
 
         Ok(Self {
@@ -572,10 +572,6 @@ where
             std::task::Poll::Ready(Some(data)) => {
                 match bincode::deserialize::<WireMessage>(&data) {
                     Ok(wire_msg) => {
-                        if let Err(e) = message_state.validate_and_update_id(wire_msg.id) {
-                            return std::task::Poll::Ready(Some(Err(e)));
-                        }
-
                         match bincode::deserialize(&wire_msg.payload) {
                             Ok(msg) => std::task::Poll::Ready(Some(Ok(round_based::Incoming {
                                 id: wire_msg.id,

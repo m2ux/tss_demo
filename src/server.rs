@@ -65,7 +65,7 @@
 //! * Message serialization errors
 //! * Client registration conflicts
 
-use crate::network::WireMessage;
+use crate::network::{MessageState, WireMessage};
 use futures::channel::{mpsc, mpsc::unbounded};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -114,7 +114,6 @@ pub struct PartySession {
 pub enum ServerMessage {
     /// Register with party ID
     Register { session: PartySession },
-    /// Unregister request
     Unregister { session: PartySession },
 }
 
@@ -153,6 +152,9 @@ struct ClientSession {
 pub struct WsServer {
     /// Thread-safe registry of connected clients
     clients: Arc<RwLock<HashMap<PartySession, ClientSession>>>,
+
+    message_state: Arc<RwLock<MessageState>>,
+
     /// Socket address the server is bound to
     addr: String,
 }
@@ -178,6 +180,7 @@ impl WsServer {
     pub fn new(addr: String) -> Self {
         Self {
             clients: Arc::new(RwLock::new(HashMap::new())),
+            message_state: Arc::new(RwLock::new(MessageState::new())),
             addr,
         }
     }
@@ -220,9 +223,11 @@ impl WsServer {
             println!("New connection from: {}", addr);
 
             let clients = Arc::clone(&self.clients);
+            let message_state = Arc::clone(&self.message_state);
 
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection(stream, addr, clients).await {
+                if let Err(e) = Self::handle_connection(stream, addr, clients, message_state).await
+                {
                     eprintln!("Error handling connection from {}: {}", addr, e);
                 }
             });
@@ -264,6 +269,7 @@ impl WsServer {
         stream: TcpStream,
         addr: SocketAddr,
         clients: Arc<RwLock<HashMap<PartySession, ClientSession>>>,
+        message_state: Arc<RwLock<MessageState>>,
     ) -> Result<(), ServerError> {
         let ws_stream = accept_async(stream).await?;
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
@@ -284,12 +290,7 @@ impl WsServer {
                                     ));
                                 }
 
-                                clients_lock.insert(
-                                    session.clone(),
-                                    ClientSession {
-                                        sender: tx,
-                                    },
-                                );
+                                clients_lock.insert(session.clone(), ClientSession { sender: tx });
 
                                 println!(
                                     "Registered party ID {} with committee session {}",
@@ -332,19 +333,15 @@ impl WsServer {
                     if let Message::Binary(data) = msg {
                         //println!("Received binary message from party {}", party_id);
 
-                        // Try to deserialize as ServerMessage
-                        if let Ok(server_msg) = bincode::deserialize::<ServerMessage>(&data) {
-                            Self::handle_server_message(
-                                &party_session,
-                                server_msg,
-                                &clients_for_receiver,
-                            )
-                            .await;
-                            continue;
-                        }
-
                         // Try to deserialize as WireMessage (Protocol Message)
                         if let Ok(wire_msg) = bincode::deserialize::<WireMessage>(&data) {
+                            // Increment the message ID if ok or error and break if the monotonic increment validation fails
+                        /*    let mut message_state_lock = message_state.write().await;
+                            if let Err(e) = message_state_lock.validate_and_update_id(wire_msg.id) {
+                                println!("{}", e);
+                                break;
+                            }*/
+
                             Self::handle_client_message(
                                 &party_session,
                                 wire_msg,
@@ -354,6 +351,17 @@ impl WsServer {
                             continue;
                         }
 
+                        // Try to deserialize as ServerMessage
+                        if let Ok(server_msg) = bincode::deserialize::<ServerMessage>(&data) {
+                            Self::handle_server_message(
+                                &party_session,
+                                server_msg,
+                                &clients_for_receiver,
+                            )
+                                .await;
+                            continue;
+                        }
+                        
                         println!(
                             "Unable to deserialize message from party {}, session {}",
                             &party_session.party_id, &party_session.session_id

@@ -143,17 +143,13 @@ async fn main() -> Result<(), Error> {
                 Error::Config("Party ID is required for committee and service modes".into())
             })?;
 
-            // Initialize storage
-            let storage =
-                KeyStorage::new("keys", "a very secret key that should be properly secured")?;
-
             // Select operating mode
             match mode {
                 OperationMode::Committee => {
-                    run_committee_mode(args.server, storage, party_id).await?;
+                    run_committee_mode(args.server, party_id).await?;
                 }
                 OperationMode::Service(message) => {
-                    run_service_mode(args.server, storage, party_id, message).await?;
+                    run_service_mode(args.server, party_id, message).await?;
                 }
                 OperationMode::Server => unreachable!(),
             }

@@ -114,8 +114,12 @@ impl KeyStorage {
 
         let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| StorageError::Encryption)?;
 
+        // Create storage directory if it doesn't exist
+        let path = storage_path.as_ref().to_owned();
+        std::fs::create_dir_all(&path)?;
+
         Ok(Self {
-            storage_path: storage_path.as_ref().to_owned(),
+            storage_path: path,
             cipher,
         })
     }
