@@ -61,18 +61,11 @@ mod server;
 mod service;
 mod storage;
 
-use cggmp21::{
-    keygen::ThresholdMsg, security_level::SecurityLevel128, supported_curves::Secp256k1,
-};
 use clap::Parser;
 use error::Error;
-use futures_util::{SinkExt, StreamExt};
-use network::WsDelivery;
 use protocol::run_committee_mode;
 use service::run_service_mode;
-use sha2::Sha256;
 use storage::KeyStorage;
-use tracing::info;
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {

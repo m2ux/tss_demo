@@ -1,14 +1,14 @@
 use crate::error::Error;
-use crate::network::{NDelivery, NetworkError, WsDelivery, WsSender};
+use crate::network::WsDelivery;
 use crate::storage::KeyStorage;
 use cggmp21::{
-    key_refresh::AuxOnlyMsg, key_share::AuxInfo, keygen::ThresholdMsg,
-    security_level::SecurityLevel128, supported_curves::Secp256k1, ExecutionId, PregeneratedPrimes,
+    key_refresh::AuxOnlyMsg, keygen::ThresholdMsg, security_level::SecurityLevel128,
+    supported_curves::Secp256k1, ExecutionId, PregeneratedPrimes,
 };
 use futures::TryStream;
-use futures::{Sink, Stream, StreamExt};
+use futures::{Sink, SinkExt, StreamExt};
 use rand_core::OsRng;
-use round_based::{Delivery, Incoming, MpcParty, Outgoing};
+use round_based::{Delivery, Incoming, MessageDestination, MpcParty, Outgoing};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashSet;
@@ -59,47 +59,38 @@ enum CommitteeState {
 /// Defines the structure and types of control messages used for committee coordination
 ///
 /// These messages handle committee formation, state synchronization, and signing operations
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ControlMessage {
     /// Sent by a party to announce their presence and join the committee
     /// - party_id: Unique identifier of the announcing party
-    CommitteeMemberAnnouncement { party_id: u16 },
+    CommitteeMemberAnnouncement,
 
     /// Propose an execution ID for this session
-    ExecutionIdProposal { party_id: u16, execution_id: String },
+    ExecutionIdProposal { execution_id: String },
 
     /// Accept a proposed execution ID
-    ExecutionIdAccept { party_id: u16, execution_id: String },
+    ExecutionIdAccept { execution_id: String },
 
     /// Response message containing the current state of the committee
-    /// - members: Set of party IDs that have joined the committee
-    /// - aux_info_ready: Set of parties that have completed auxiliary info generation
-    /// - keygen_ready: Set of parties that have completed key generation
     CommitteeState {
-        members: HashSet<u16>,
-        aux_info_ready: HashSet<u16>,
-        keygen_ready: HashSet<u16>,
+        members: HashSet<u16>,        // Set of party IDs that have joined the committee
+        aux_info_ready: HashSet<u16>, // Set of parties that have completed aux info generation
+        keygen_ready: HashSet<u16>,   // Set of parties that have completed key generation
     },
 
     /// Announcement that a party has completed generating auxiliary information
-    /// - party_id: ID of the party that completed aux info generation
-    AuxInfoReady { party_id: u16 },
+    AuxInfoReady,
 
     /// Announcement that a party has completed key generation
-    /// - party_id: ID of the party that completed key generation
-    KeyGenReady { party_id: u16 },
+    KeyGenReady,
 
     /// Request to initiate a signing operation
     /// - message: The message to be signed
-    /// - initiator: ID of the party requesting the signature
-    /// - session_id: Unique session identifier for this signing operation
-    SigningRequest { message: String, initiator: u16 },
+    SigningRequest { message: String },
 
     /// Message containing a party's share of the signature
-    /// - party_id: ID of the party providing the signature share
-    /// - session_id: Session identifier for this signature
     /// - share: The signature share data
-    SignatureShare { party_id: u16, share: Vec<u8> },
+    SignatureShare { share: Vec<u8> },
 }
 
 /// Structure representing a committee and its state
@@ -109,7 +100,6 @@ struct Protocol {
     pub aux_info_ready: HashSet<u16>,
     pub keygen_ready: HashSet<u16>,
     pub execution_id_coord: ExecutionIdCoordination,
-    pub committee_state: CommitteeState,
 }
 
 impl Protocol {
@@ -122,7 +112,6 @@ impl Protocol {
             aux_info_ready: HashSet::new(),
             keygen_ready: HashSet::new(),
             execution_id_coord: ExecutionIdCoordination::new(),
-            committee_state: CommitteeState::AwaitingMembers,
         }
     }
 }
@@ -142,7 +131,7 @@ pub async fn run_committee_mode(
     let _ = delivery.register();
 
     // Get sender for all outgoing messages
-    let (mut receiver, sender) = NDelivery::split(delivery);
+    let (mut receiver, mut sender) = Delivery::split(delivery);
 
     // Initialize protocol
     let protocol = Arc::new(RwLock::new(Protocol::new(party_id)));
@@ -163,19 +152,21 @@ pub async fn run_committee_mode(
         }
     });
 
+    let mut committee_state = CommitteeState::AwaitingMembers;
+
     // Committee initialization phase
     loop {
         let mut protocol = protocol.write().await;
 
-        match protocol.committee_state {
+        match committee_state {
             CommitteeState::AwaitingMembers => {
                 if protocol.committee_members.len() >= 5 {
                     println!("All committee members present. Establishing execution ID.");
-                    protocol.committee_state = CommitteeState::EstablishingExecutionId;
+                    committee_state = CommitteeState::EstablishingExecutionId;
                 } else {
                     println!("Broadcasting presence as committee member {}", party_id);
                     sender
-                        .broadcast(ControlMessage::CommitteeMemberAnnouncement { party_id })
+                        .broadcast(ControlMessage::CommitteeMemberAnnouncement)
                         .await
                         .map_err(Error::Network)?;
 
@@ -192,13 +183,10 @@ pub async fn run_committee_mode(
 
                     let execution_id = protocol.execution_id_coord.proposed_id.clone().unwrap();
                     sender
-                        .broadcast(ControlMessage::ExecutionIdProposal {
-                            party_id,
-                            execution_id,
-                        })
+                        .broadcast(ControlMessage::ExecutionIdProposal { execution_id })
                         .await
                         .map_err(Error::Network)?;
-                    protocol.committee_state = CommitteeState::AwaitingExecutionId;
+                    committee_state = CommitteeState::AwaitingExecutionId;
                 }
                 // Non-proposing parties wait in this state until they receive a proposal
                 else {
@@ -208,13 +196,10 @@ pub async fn run_committee_mode(
                             let execution_id =
                                 protocol.execution_id_coord.proposed_id.clone().unwrap();
                             sender
-                                .broadcast(ControlMessage::ExecutionIdAccept {
-                                    party_id,
-                                    execution_id,
-                                })
+                                .broadcast(ControlMessage::ExecutionIdAccept { execution_id })
                                 .await
                                 .map_err(Error::Network)?;
-                            protocol.committee_state = CommitteeState::AwaitingExecutionId;
+                            committee_state = CommitteeState::AwaitingExecutionId;
                         } else {
                             println!(
                                 "Ignoring proposal from non-lowest ID party {}",
@@ -233,7 +218,7 @@ pub async fn run_committee_mode(
                     if let Some(agreed_id) = protocol.execution_id_coord.get_agreed_id() {
                         storage.save("execution_id", &agreed_id)?;
                         println!("Execution ID established: {:?}", agreed_id);
-                        protocol.committee_state = CommitteeState::GeneratingAuxInfo;
+                        committee_state = CommitteeState::GeneratingAuxInfo;
                     }
                 }
             }
@@ -251,17 +236,17 @@ pub async fn run_committee_mode(
                 storage.save("aux_info", &aux_info)?;
 
                 sender
-                    .broadcast(ControlMessage::AuxInfoReady { party_id })
+                    .broadcast(ControlMessage::AuxInfoReady)
                     .await
                     .map_err(Error::Network)?;
 
                 protocol.aux_info_ready.insert(party_id);
-                protocol.committee_state = CommitteeState::AwaitingAuxInfo;
+                committee_state = CommitteeState::AwaitingAuxInfo;
             }
             CommitteeState::AwaitingAuxInfo => {
                 if protocol.aux_info_ready.len() >= 5 {
                     println!("All auxiliary info generated. Starting key generation.");
-                    protocol.committee_state = CommitteeState::GeneratingKeys;
+                    committee_state = CommitteeState::GeneratingKeys;
                 }
             }
             CommitteeState::GeneratingKeys => {
@@ -278,17 +263,17 @@ pub async fn run_committee_mode(
                 storage.save("key_share", &key_share)?;
 
                 sender
-                    .broadcast(ControlMessage::KeyGenReady { party_id })
+                    .broadcast(ControlMessage::KeyGenReady)
                     .await
                     .map_err(Error::Network)?;
 
                 protocol.keygen_ready.insert(party_id);
-                protocol.committee_state = CommitteeState::AwaitingKeyGen;
+                committee_state = CommitteeState::AwaitingKeyGen;
             }
             CommitteeState::AwaitingKeyGen => {
                 if protocol.keygen_ready.len() >= 5 {
                     println!("Key generation complete. Ready for signing operations.");
-                    protocol.committee_state = CommitteeState::Ready;
+                    committee_state = CommitteeState::Ready;
                 }
             }
             CommitteeState::Ready => {
@@ -308,39 +293,37 @@ pub async fn run_committee_mode(
 
 /// Network message handler
 async fn handle_message(
-    message: ControlMessage,
+    incoming: Incoming<ControlMessage>,
     protocol: &Arc<RwLock<Protocol>>,
 ) -> Result<(), Error> {
     let mut protocol = protocol.write().await;
 
-    match message {
-        ControlMessage::CommitteeMemberAnnouncement { party_id: pid } => {
+    // Extract party ID from incoming message
+    let pid = incoming.sender;
+
+    // Match the message content
+    match incoming.msg {
+        ControlMessage::CommitteeMemberAnnouncement => {
             protocol.committee_members.insert(pid);
             println!("New committee member: {}", pid);
         }
-        ControlMessage::ExecutionIdProposal {
-            party_id: pid,
-            execution_id,
-        } => {
-            if protocol.committee_state == CommitteeState::EstablishingExecutionId {
-                protocol.execution_id_coord.consider(pid, execution_id);
-            }
+        ControlMessage::ExecutionIdProposal { execution_id } => {
+            protocol.execution_id_coord.consider(pid, execution_id);
         }
-        ControlMessage::ExecutionIdAccept {
-            party_id: pid,
-            execution_id,
-        } => {
-            if protocol.committee_state == CommitteeState::EstablishingExecutionId {
-                protocol.execution_id_coord.accept(pid, &execution_id);
-            }
+        ControlMessage::ExecutionIdAccept { execution_id } => {
+            protocol.execution_id_coord.accept(pid, &execution_id);
         }
-        ControlMessage::AuxInfoReady { party_id: pid } => {
+        ControlMessage::AuxInfoReady => {
             protocol.aux_info_ready.insert(pid);
+            println!("Party {} completed aux info generation", pid);
         }
-        ControlMessage::KeyGenReady { party_id: pid } => {
+        ControlMessage::KeyGenReady => {
             protocol.keygen_ready.insert(pid);
+            println!("Party {} completed key generation", pid);
         }
-        _ => {}
+        _ => {
+            println!("Received unhandled message type from party {}", pid);
+        }
     }
 
     Ok(())
@@ -414,10 +397,10 @@ pub async fn discover_committee_members() -> Result<HashSet<u16>, Error> {
     .await?;
 
     // Split into receiver and sender
-    let (mut receiver, sender) = NDelivery::split(delivery);
+    let (mut receiver, mut sender) = Delivery::split(delivery);
 
     sender
-        .broadcast(ControlMessage::CommitteeMemberAnnouncement { party_id: 0 })
+        .broadcast(ControlMessage::CommitteeMemberAnnouncement)
         .await
         .map_err(Error::Network)?;
 
@@ -435,12 +418,18 @@ pub async fn discover_committee_members() -> Result<HashSet<u16>, Error> {
                 break;
             }
             Some(msg_result) = receiver.next() => {
+
                 match msg_result {
-                    Ok(msg) => {
-                        match msg {
-                            ControlMessage::CommitteeMemberAnnouncement { party_id } => {
-                                if party_id != 0 { // Don't include discovery party
-                                    committee.insert(party_id);
+                    Ok(incoming) => {
+
+                        // Extract party ID from incoming message
+                        let pid = incoming.sender;
+
+                        // Match the message content
+                        match incoming.msg {
+                            ControlMessage::CommitteeMemberAnnouncement => {
+                                if pid != 0 { // Don't include discovery party
+                                    committee.insert(pid);
                                 }
                             }
                             ControlMessage::CommitteeState { members, .. } => {
@@ -558,7 +547,7 @@ pub async fn handle_signing_requests(
     }
 
     loop {
-        if let Some(request) = crate::protocol::await_signing_request().await? {
+        if let Some(request) = await_signing_request().await? {
             handle_signing_request(request, storage, party_id).await?;
         }
     }
