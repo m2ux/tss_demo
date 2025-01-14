@@ -1,11 +1,6 @@
 use crate::error::Error;
-use crate::network::WsDelivery;
 use crate::protocol::discover_committee_members;
 use crate::storage::KeyStorage;
-use cggmp21::keygen::ThresholdMsg;
-use cggmp21::security_level::SecurityLevel128;
-use cggmp21::supported_curves::Secp256k1;
-use sha2::Sha256;
 
 /// Runs the application in signing-service mode
 pub async fn run_service_mode(
