@@ -1,6 +1,7 @@
 use crate::error::Error;
 use crate::network::WsDelivery;
 use crate::storage::KeyStorage;
+use cggmp21::key_share::AuxInfo;
 use cggmp21::{
     key_refresh::AuxOnlyMsg, keygen::ThresholdMsg, security_level::SecurityLevel128,
     supported_curves::Secp256k1, ExecutionId, PregeneratedPrimes,
@@ -12,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashSet;
 use std::sync::Arc;
-use cggmp21::key_share::AuxInfo;
 use tokio::sync::RwLock;
 
 /// Represents the various stages of committee initialization and operation
@@ -208,9 +208,12 @@ pub async fn run_committee_mode(
                 // Non-proposing parties wait in this state until they receive a proposal
                 else {
                     match protocol.execution_id_coord.proposer {
-                        Some(proposer) if proposer == *protocol.committee_members.iter().min().unwrap() => {
+                        Some(proposer)
+                            if proposer == *protocol.committee_members.iter().min().unwrap() =>
+                        {
                             protocol.execution_id_coord.approve(party_id);
-                            let execution_id = protocol.execution_id_coord.proposed_id.clone().unwrap();
+                            let execution_id =
+                                protocol.execution_id_coord.proposed_id.clone().unwrap();
                             sender
                                 .broadcast(ControlMessage::ExecutionIdAccept { execution_id })
                                 .await
@@ -218,12 +221,9 @@ pub async fn run_committee_mode(
                             committee_state = CommitteeState::AwaitingExecutionId;
                         }
                         Some(proposer) => {
-                            println!(
-                                "Ignoring proposal from non-lowest ID party {}",
-                                proposer
-                            );
+                            println!("Ignoring proposal from non-lowest ID party {}", proposer);
                         }
-                        None => ()
+                        None => (),
                     }
                 }
             }

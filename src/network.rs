@@ -29,7 +29,7 @@
 //! }
 //! ```
 
-use crate::server::ServerMessage;
+use crate::server::{PartySession, ServerMessage};
 use futures::channel::{mpsc, mpsc::unbounded};
 use futures::{stream::SplitStream, Sink, SinkExt, Stream, StreamExt};
 use round_based::{Delivery, Incoming, MessageDestination, Outgoing};
@@ -318,7 +318,7 @@ where
                 }
             }
         });
-        
+
         Ok(Self {
             sender: WsSender {
                 sender: ws_sender_tx,
@@ -337,8 +337,10 @@ where
     /// Registers this party with the ws server
     pub fn register(&self) -> Result<(), NetworkError> {
         let reg_msg = ServerMessage::Register {
-            party_id: self.sender.party_id,
-            session_id: self.sender.session_id,
+            session: PartySession {
+                party_id: self.sender.party_id,
+                session_id: self.sender.session_id,
+            },
         };
         let serialized = bincode::serialize(&reg_msg)
             .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
@@ -354,9 +356,10 @@ where
     /// Unregisters this party from the ws server
     pub fn unregister(&self) -> Result<(), NetworkError> {
         let unreg_msg = ServerMessage::Unregister {
-            party_id: self.sender.party_id,
-            session_id: self.sender.session_id,
-            
+            session: PartySession {
+                party_id: self.sender.party_id,
+                session_id: self.sender.session_id,
+            },
         };
         let serialized = bincode::serialize(&unreg_msg)
             .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
