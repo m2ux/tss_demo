@@ -276,12 +276,15 @@ where
     /// # Arguments
     ///
     /// * `server_addr` - WebSocket server address (e.g., "ws://localhost:8080")
-    /// * `party_id` - Unique identifier for this party in the protocol
+    /// * `session_id` - Unique identifier for this session
     ///
     /// # Errors
     ///
     /// Returns `NetworkError` if connection fails or initialization errors occur.
-    pub async fn connect(server_addr: &str, party_id: u16) -> Result<Self, NetworkError> {
+    pub async fn connect<S>(server_addr: &str, session_id: S) -> Result<Self, NetworkError>
+    where
+        S: Into<u16>,
+    {
         let (ws_stream, _) = connect_async(server_addr)
             .await
             .map_err(NetworkError::WebSocket)?;
@@ -315,7 +318,7 @@ where
         Ok(Self {
             sender: WsSender {
                 sender: ws_sender_tx,
-                party_id,
+                party_id: session_id.into(),
                 _phantom: PhantomData,
             },
             receiver: WsReceiver {

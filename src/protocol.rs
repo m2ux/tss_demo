@@ -91,6 +91,22 @@ pub enum ControlMessage {
     SignatureShare { share: Vec<u8> },
 }
 
+/// Defines the structure and types of control messages used for committee coordination
+///
+/// These messages handle committee formation, state synchronization, and signing operations
+#[derive(Serialize, Debug, Clone)]
+#[serde(into = "u16", from = "u16")]
+pub enum CommitteeSession {
+    Control,
+    Protocol,
+}
+
+impl From<CommitteeSession> for u16 {
+    fn from(id: CommitteeSession) -> u16 {
+        id as u16
+    }
+}
+
 /// Structure representing a committee and its state
 #[derive(Debug)]
 struct Protocol {
@@ -123,7 +139,8 @@ pub async fn run_committee_mode(
     println!("Starting in committee mode with party ID: {}", party_id);
 
     // Initialize control message connection
-    let delivery = WsDelivery::<ControlMessage>::connect(&server_addr, party_id).await?;
+    let delivery =
+        WsDelivery::<ControlMessage>::connect(&server_addr, CommitteeSession::Control).await?;
 
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let _ = delivery.register();
@@ -389,8 +406,8 @@ pub async fn discover_committee_members() -> Result<HashSet<u16>, Error> {
 
     // Connect to the WebSocket server
     let delivery = WsDelivery::<ControlMessage>::connect(
-        "ws://localhost:8080", // This should use the configured server address
-        0,                     // Use party ID 0 for discovery
+        "ws://localhost:8080",      // This should use the configured server address
+        CommitteeSession::Protocol, // Use party ID 0 for discovery
     )
     .await?;
 
