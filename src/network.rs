@@ -100,7 +100,7 @@ pub enum NetworkError {
     InvalidMessageId { expected: u64, actual: u64 },
 }
 
-//// Tracks message ordering state to ensure proper message sequencing.
+/// Tracks message ordering state to ensure proper message sequencing.
 ///
 /// The MessageState struct is responsible for maintaining and validating the order
 /// of messages in the network communication protocol. It uses wrapping arithmetic
@@ -187,6 +187,7 @@ impl MessageState {
 pub struct WsSender<M> {
     sender: mpsc::UnboundedSender<Vec<u8>>,
     party_id: u16,
+    session_id: u16,
     _phantom: PhantomData<M>,
 }
 
@@ -264,7 +265,6 @@ impl WireMessage {
 pub struct WsDelivery<M> {
     sender: WsSender<M>,
     receiver: WsReceiver<M>,
-    server_addr: String,
 }
 
 impl<M> WsDelivery<M>
@@ -281,7 +281,11 @@ where
     /// # Errors
     ///
     /// Returns `NetworkError` if connection fails or initialization errors occur.
-    pub async fn connect<S>(server_addr: &str, session_id: S) -> Result<Self, NetworkError>
+    pub async fn connect<S>(
+        server_addr: &str,
+        party_id: u16,
+        session_id: S,
+    ) -> Result<Self, NetworkError>
     where
         S: Into<u16>,
     {
@@ -314,11 +318,12 @@ where
                 }
             }
         });
-
+        
         Ok(Self {
             sender: WsSender {
                 sender: ws_sender_tx,
-                party_id: session_id.into(),
+                party_id,
+                session_id: session_id.into(),
                 _phantom: PhantomData,
             },
             receiver: WsReceiver {
@@ -326,19 +331,14 @@ where
                 message_state: MessageState::new(),
                 _phantom: PhantomData,
             },
-            server_addr: server_addr.to_string(),
         })
-    }
-
-    /// Returns the server address this delivery instance is connected to
-    pub fn addr(&self) -> &str {
-        &self.server_addr
     }
 
     /// Registers this party with the ws server
     pub fn register(&self) -> Result<(), NetworkError> {
         let reg_msg = ServerMessage::Register {
             party_id: self.sender.party_id,
+            session_id: self.sender.session_id,
         };
         let serialized = bincode::serialize(&reg_msg)
             .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
@@ -355,6 +355,8 @@ where
     pub fn unregister(&self) -> Result<(), NetworkError> {
         let unreg_msg = ServerMessage::Unregister {
             party_id: self.sender.party_id,
+            session_id: self.sender.session_id,
+            
         };
         let serialized = bincode::serialize(&unreg_msg)
             .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;

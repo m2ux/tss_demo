@@ -108,9 +108,9 @@ pub enum ServerError {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ServerMessage {
     /// Register with party ID
-    Register { party_id: u16 },
+    Register { party_id: u16, session_id: u16 },
     /// Unregister request
-    Unregister { party_id: u16 },
+    Unregister { party_id: u16, session_id: u16 },
 }
 
 /// Represents a connected client session in the WebSocket server.
@@ -275,7 +275,7 @@ impl WsServer {
                 Some(Ok(msg)) => {
                     if let Message::Binary(data) = msg {
                         match bincode::deserialize::<ServerMessage>(&data) {
-                            Ok(ServerMessage::Register { party_id }) => {
+                            Ok(ServerMessage::Register { party_id, session_id }) => {
                                 // Handle registration
                                 let mut clients_lock = clients.write().await;
                                 if clients_lock.contains_key(&party_id) {
@@ -295,7 +295,7 @@ impl WsServer {
                                 println!("Registered client with party ID: {}", party_id);
                                 break party_id;
                             }
-                            Ok(ServerMessage::Unregister { party_id }) => {
+                            Ok(ServerMessage::Unregister { party_id, session_id }) => {
                                 let mut clients_lock = clients.write().await;
                                 if clients_lock.remove(&party_id).is_some() {
                                     println!("Unregistered client with party ID: {}", party_id);
@@ -367,11 +367,11 @@ impl WsServer {
     ) {
         //println!("Handling server message from party {}", sender_id);
         match msg {
-            ServerMessage::Register { party_id } => {
+            ServerMessage::Register { party_id, session_id } => {
                 println!("Received registration message from party {}", party_id);
                 // Registration is handled in handle_connection
             }
-            ServerMessage::Unregister { party_id } => {
+            ServerMessage::Unregister { party_id, session_id } => {
                 println!("Received unregister message from party {}", party_id);
                 let mut clients_lock = clients.write().await;
                 clients_lock.remove(&party_id);

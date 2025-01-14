@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashSet;
 use std::sync::Arc;
+use cggmp21::key_share::AuxInfo;
 use tokio::sync::RwLock;
 
 /// Represents the various stages of committee initialization and operation
@@ -140,7 +141,8 @@ pub async fn run_committee_mode(
 
     // Initialize control message connection
     let delivery =
-        WsDelivery::<ControlMessage>::connect(&server_addr, CommitteeSession::Control).await?;
+        WsDelivery::<ControlMessage>::connect(&server_addr, party_id, CommitteeSession::Control)
+            .await?;
 
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let _ = delivery.register();
@@ -205,22 +207,23 @@ pub async fn run_committee_mode(
                 }
                 // Non-proposing parties wait in this state until they receive a proposal
                 else {
-                    if let Some(proposer) = &protocol.execution_id_coord.proposer {
-                        if proposer == protocol.committee_members.iter().min().unwrap() {
+                    match protocol.execution_id_coord.proposer {
+                        Some(proposer) if proposer == *protocol.committee_members.iter().min().unwrap() => {
                             protocol.execution_id_coord.approve(party_id);
-                            let execution_id =
-                                protocol.execution_id_coord.proposed_id.clone().unwrap();
+                            let execution_id = protocol.execution_id_coord.proposed_id.clone().unwrap();
                             sender
                                 .broadcast(ControlMessage::ExecutionIdAccept { execution_id })
                                 .await
                                 .map_err(Error::Network)?;
                             committee_state = CommitteeState::AwaitingExecutionId;
-                        } else {
+                        }
+                        Some(proposer) => {
                             println!(
                                 "Ignoring proposal from non-lowest ID party {}",
-                                &protocol.execution_id_coord.proposer.unwrap()
+                                proposer
                             );
                         }
+                        None => ()
                     }
                 }
             }
@@ -350,12 +353,16 @@ async fn generate_auxiliary_info(
     n_parties: u16,
     server_addr: &str,
     eid: ExecutionId<'_>,
-) -> Result<Vec<u8>, Error> {
+) -> Result<AuxInfo, Error> {
     println!("Generating auxiliary information for party {}", party_id);
 
     // Create a new delivery instance for aux info generation
-    let delivery =
-        WsDelivery::<AuxOnlyMsg<Sha256, SecurityLevel128>>::connect(server_addr, party_id).await?;
+    let delivery = WsDelivery::<AuxOnlyMsg<Sha256, SecurityLevel128>>::connect(
+        server_addr,
+        party_id,
+        CommitteeSession::Protocol,
+    )
+    .await?;
 
     let primes = PregeneratedPrimes::generate(&mut OsRng);
     let aux_info = cggmp21::aux_info_gen(eid, party_id, n_parties, primes)
@@ -363,11 +370,8 @@ async fn generate_auxiliary_info(
         .await
         .map_err(|e| Error::Protocol(e.to_string()))?;
 
-    // Serialize the auxiliary information
-    let serialized = bincode::serialize(&aux_info).map_err(Error::Serialization)?;
-
     println!("Auxiliary information generated successfully");
-    Ok(serialized)
+    Ok(aux_info)
 }
 
 /// Generates key share through distributed key generation protocol
@@ -383,6 +387,7 @@ async fn generate_key_share(
     let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
         server_addr,
         party_id,
+        CommitteeSession::Protocol,
     )
     .await?;
 
@@ -406,7 +411,8 @@ pub async fn discover_committee_members() -> Result<HashSet<u16>, Error> {
 
     // Connect to the WebSocket server
     let delivery = WsDelivery::<ControlMessage>::connect(
-        "ws://localhost:8080",      // This should use the configured server address
+        "ws://localhost:8080", // This should use the configured server address
+        0,
         CommitteeSession::Protocol, // Use party ID 0 for discovery
     )
     .await?;
