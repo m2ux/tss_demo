@@ -127,12 +127,9 @@ pub enum ServerMessage {
 ///
 /// # Fields
 ///
-/// * `party_id` - Unique identifier for the party
 /// * `sender` - Channel for sending messages to this client
 /// Represents a connected client session
 struct ClientSession {
-    /// Party ID of the connected client
-    party_id: u16,
     /// Channel for sending messages to the client
     sender: mpsc::UnboundedSender<Message>,
 }
@@ -291,7 +288,6 @@ impl WsServer {
                                 clients_lock.insert(
                                     session.clone(),
                                     ClientSession {
-                                        party_id: session.party_id,
                                         sender: tx,
                                     },
                                 );
