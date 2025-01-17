@@ -101,6 +101,8 @@ pub enum ControlMessage {
 pub enum CommitteeSession {
     Control,
     Protocol,
+    SigningSession,
+    Signing
 }
 
 impl From<CommitteeSession> for u16 {
@@ -116,6 +118,7 @@ struct Protocol {
     pub aux_info_ready: HashSet<u16>,
     pub keygen_ready: HashSet<u16>,
     pub execution_id_coord: ExecutionIdCoordination,
+    pub signing_request: Option<SigningRequest>,
 }
 
 impl Protocol {
@@ -128,6 +131,7 @@ impl Protocol {
             aux_info_ready: HashSet::new(),
             keygen_ready: HashSet::new(),
             execution_id_coord: ExecutionIdCoordination::new(),
+            signing_request: None,
         }
     }
 }
@@ -136,6 +140,7 @@ impl Protocol {
 pub async fn run_committee_mode(
     server_addr: String,
     party_id: u16,
+    signer_id: Option<u16>,
 ) -> Result<(), Error> {
     println!("Starting in committee mode with party ID: {}", party_id);
 
@@ -173,7 +178,7 @@ pub async fn run_committee_mode(
     });
 
     let mut committee_state = CommitteeState::AwaitingMembers;
-    //println!("Broadcasting presence as committee member {}", party_id);
+    println!("Broadcasting presence as committee member {}", party_id);
 
     // Committee initialization phase
     loop {
@@ -202,6 +207,8 @@ pub async fn run_committee_mode(
                         .propose(party_id, proposed_id.clone());
 
                     let execution_id = protocol.execution_id_coord.proposed_id.clone().unwrap();
+                    println!("Proposing execution ID: {}", &execution_id);
+                    
                     sender
                         .broadcast(ControlMessage::ExecutionIdProposal { execution_id })
                         .await
@@ -251,7 +258,7 @@ pub async fn run_committee_mode(
                     party_id,
                     protocol.committee_members.len() as u16,
                     &server_addr,
-                    ExecutionId::new(&execution_id.as_bytes()),
+                    ExecutionId::new(execution_id.as_bytes()),
                 )
                 .await?;
                 storage.save("aux_info", &aux_info)?;
@@ -298,16 +305,18 @@ pub async fn run_committee_mode(
                 }
             }
             CommitteeState::Ready => {
-                let execution_id = storage.load::<String>("execution_id")?;
-
                 // Start handling signing requests
-                handle_signing_requests(
-                    &storage,
-                    party_id,
-                    ExecutionId::new(&execution_id.as_bytes()),
-                )
-                .await?;
+                loop {
+                    if let Some(request) = protocol.signing_request.take(){
+
+                    }
+
+                    // Establish signing quorum
+                    
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
             }
+            
         }
     }
 }
@@ -335,6 +344,7 @@ async fn handle_message(
         }
         ControlMessage::ExecutionIdAccept { execution_id } => {
             protocol.execution_id_coord.accept(pid, &execution_id);
+            println!("Party {} accepted execution ID", pid);
         }
         ControlMessage::AuxInfoReady => {
             protocol.aux_info_ready.insert(pid);
@@ -396,7 +406,7 @@ async fn generate_key_share(
     )
     .await?;
 
-    // Initialize key generation with CGGMP21
+    // Initialize key generation
     let keygen = cggmp21::keygen::<Secp256k1>(eid, party_id, committee.len() as u16)
         .set_threshold(3)
         .enforce_reliable_broadcast(true)
@@ -508,77 +518,7 @@ pub struct SigningRequest {
     pub initiator: u16,
 }
 
-/// Handles signing requests after initialization
-pub async fn handle_signing_requests(
-    storage: &KeyStorage,
-    party_id: u16,
-    _eid: ExecutionId<'_>,
-) -> Result<(), Error> {
-    /// Handles an incoming signing request
-    async fn handle_signing_request(
-        request: SigningRequest,
-        _storage: &KeyStorage,
-        _party_id: u16,
-    ) -> Result<(), Error> {
-        println!("Handling signing request from party {}", request.initiator);
-        /*
-                // Load the key share and aux info
-                let key_share_bytes = storage.load::<Vec<u8>>("key_share")?;
-                let aux_info_bytes = storage.load::<Vec<u8>>("aux_info")?;
 
-                // Deserialize the key share and aux info
-                let key_share: cggmp21::KeyShare<Secp256k1, SecurityLevel128> =
-                    bincode::deserialize(&key_share_bytes).map_err(Error::Serialization)?;
-                let aux_info: AuxInfo<SecurityLevel128> =
-                    bincode::deserialize(&aux_info_bytes).map_err(Error::Serialization)?;
-
-                // Create a new delivery instance for signing
-                let sign_delivery =
-                    WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
-                        "ws://localhost:8080",
-                        party_id,
-                    )
-                    .await?;
-        */
-        // Perform the signing operation
-        /*       let signature = cggmp21::signing(
-            eid,
-            party_id,
-            aux_info,
-            request.message.as_bytes(),
-        )
-            .start(&mut OsRng, MpcParty::connected(sign_delivery))
-            .await
-            .map_err(|e| Error::Protocol(e.to_string()))?;
-
-        // Create signature share message
-        let signature_msg = crate::protocol::ProtocolMessage::SignatureShare {
-            party_id,
-            share: bincode::serialize(&signature).map_err(Error::Serialization)?,
-        };
-
-        // Broadcast signature share
-        let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
-            "ws://localhost:8080",
-            party_id,
-        ).await?;
-
-        let (_receiver, sender) = delivery.split();
-        sender.broadcast(bincode::serialize(&signature_msg).map_err(Error::Serialization)?)
-            .await
-            .map_err(Error::Network)?;*/
-        ///TODO: Fix me
-
-        println!("Signature share generated and broadcast successfully");
-        Ok(())
-    }
-
-    loop {
-        if let Some(request) = await_signing_request().await? {
-            handle_signing_request(request, storage, party_id).await?;
-        }
-    }
-}
 
 /// Execution ID coordination data
 #[derive(Debug)]

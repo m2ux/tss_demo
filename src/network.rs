@@ -236,6 +236,10 @@ where
 
         Ok(())
     }
+    
+    pub fn get_party_id(&self) -> u16{
+        self.party_id
+    }
 }
 
 impl<M> Drop for WsSender<M>
