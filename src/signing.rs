@@ -1,4 +1,5 @@
 use crate::error::Error;
+use crate::network;
 use crate::network::{WsDelivery, WsReceiver, WsSender};
 use crate::protocol::CommitteeSession;
 use crate::signing::signing_protocol::Input;
@@ -21,17 +22,23 @@ use tokio::time::{Duration, Instant};
 #[derive(Serialize, Deserialize, Debug)]
 pub enum SigningProtocolMessage {
     /// Message to be signed
-    SignRequest { message: Vec<u8> },
+    SignRequest {
+        message: Vec<u8>,
+    },
     /// Indicates availability to participate in signing
     SigningAvailable,
     /// Share collected signing candidates
-    CandidateSet { candidates: HashSet<u16> },
+    CandidateSet {
+        candidates: HashSet<u16>,
+    },
     /// Approval of quorum formation
     QuorumApproved,
     /// Decline of quorum formation
     QuorumDeclined,
 
-    SignatureShare { sig_share: Signature<Secp256k1> },
+    SignatureShare {
+        sig_share: Signature<Secp256k1>,
+    },
     /// End of signing session
     EndSigning,
 }
@@ -84,6 +91,7 @@ pub struct SigningEnv {
     current_message: Option<Vec<u8>>,
     collection_deadline: Option<Instant>,
     last_event: Option<Input>,
+    signing_timeout: Duration,
 }
 
 impl SigningEnv {
@@ -97,6 +105,7 @@ impl SigningEnv {
             current_message: None,
             collection_deadline: None,
             last_event: None,
+            signing_timeout: Duration::from_secs(30),
         }
     }
 
@@ -114,11 +123,13 @@ impl SigningEnv {
     }
 
     fn is_deadline_elapsed(&self) -> bool {
-        if let Some(deadline) = self.collection_deadline {
-            Instant::now() < deadline
-        } else {
-            false
-        }
+        self.collection_deadline
+            .map(|deadline| Instant::now() > deadline)
+            .unwrap_or(false)
+    }
+
+    fn set_deadline(&mut self) {
+        self.collection_deadline = Some(Instant::now() + self.signing_timeout);
     }
 }
 
@@ -164,20 +175,19 @@ impl Signing {
         &mut self,
         mut sender: WsSender<SigningProtocolMessage>,
     ) -> Result<(), Error> {
-        
         // Get out party ID
         let party_id = sender.get_party_id();
 
         loop {
             // Acquire a context lock
             let mut context = self.context.write().await;
-            
+
             // Detect an incoming events
             let last_event = match context.last_event.take() {
                 Some(event) => event,
                 None => continue,
             };
-            
+
             // Pre-transition actions
             match (&self.fsm.state(), last_event) {
                 (signing_protocol::State::TidyUp, _) => {
@@ -254,7 +264,9 @@ impl Signing {
                                     context.received_signatures.insert(party_id, signature);
                                     // Broadcast our signature
                                     sender
-                                        .broadcast(SigningProtocolMessage::SignatureShare { sig_share: signature })
+                                        .broadcast(SigningProtocolMessage::SignatureShare {
+                                            sig_share: signature,
+                                        })
                                         .await
                                         .map_err(Error::Network)?;
                                     context.event(Input::SigningComplete);
@@ -331,7 +343,7 @@ async fn handle_messages(
             SigningProtocolMessage::SignatureShare { sig_share } => {
                 context.received_signatures.insert(pid, sig_share);
                 Input::EndSigning
-            },
+            }
         };
 
         // Trigger an event
@@ -347,8 +359,16 @@ async fn handle_messages(
                     println!("Error handling received message: {}", e);
                 }
             }
-            Some(Err(e)) => println!("Error receiving message: {}", e),
-            None => (),
+            Some(Err(e)) => {
+                // Log error and implement recovery strategy
+                return Err(Error::Network(e));
+            }
+            None => {
+                // Handle disconnection
+                return Err(Error::Network(network::NetworkError::Connection(
+                    "Channel closed".to_string(),
+                )));
+            }
         }
     }
 }
@@ -367,7 +387,7 @@ async fn handle_signing_request(
     let key_share = storage.load::<cggmp21::KeyShare<Secp256k1, SecurityLevel128>>("key_share")?;
 
     let execution_id = ExecutionId::new(execution_id.as_bytes());
-    
+
     // Hash the message to be signed
     let data_to_sign = cggmp21::DataToSign::digest::<Sha256>(message);
 
@@ -375,13 +395,14 @@ async fn handle_signing_request(
         "ws://localhost:8080",
         party_id,
         CommitteeSession::SigningSession,
-    ).await?;
-    
+    )
+    .await?;
+
     // Generate the signature
     let signature = cggmp21::signing(execution_id, party_id, signing_parties, &key_share)
         .sign(&mut OsRng, MpcParty::connected(delivery), data_to_sign)
         .await
         .map_err(|e| Error::Protocol(e.to_string()))?;
-    
+
     Ok(signature)
 }
