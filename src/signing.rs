@@ -141,10 +141,10 @@ impl Signing {
         })
     }
 
-    pub async fn start(&mut self, party_id: u16, server_addr: String) -> Result<(), Error> {
+    pub async fn start(&mut self, party_id: u16, server_addr: &str) -> Result<(), Error> {
         // Create a new delivery instance for aux info generation
         let delivery = WsDelivery::<SigningProtocolMessage>::connect(
-            &server_addr,
+            server_addr,
             party_id,
             CommitteeSession::SigningSession,
         )
@@ -160,7 +160,7 @@ impl Signing {
     }
 
     /// Process an event and perform associated actions
-    pub async fn run_machine(
+    async fn run_machine(
         &mut self,
         mut sender: WsSender<SigningProtocolMessage>,
     ) -> Result<(), Error> {
@@ -298,7 +298,7 @@ impl Signing {
 }
 
 /// Task for handling messages
-pub async fn handle_messages(
+async fn handle_messages(
     context: Arc<RwLock<SigningEnv>>,
     mut receiver: WsReceiver<SigningProtocolMessage>,
 ) -> Result<(), Error> {

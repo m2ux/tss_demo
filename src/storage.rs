@@ -75,6 +75,7 @@ pub enum StorageError {
 /// # Type Parameters
 ///
 /// The storage supports any type that implements both Serialize and Deserialize traits.
+#[derive(Clone)]
 pub struct KeyStorage {
     /// Base directory for storing encrypted files
     storage_path: PathBuf,

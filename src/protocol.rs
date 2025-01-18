@@ -14,6 +14,7 @@ use sha2::Sha256;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use crate::signing::Signing;
 
 /// Represents the various stages of committee initialization and operation
 ///
@@ -153,6 +154,9 @@ pub async fn run_committee_mode(
         WsDelivery::<ControlMessage>::connect(&server_addr, party_id, CommitteeSession::Control)
             .await?;
 
+    // Setup a signing session
+    let mut signing = Signing::new(storage.clone()).await?;
+    
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     // Get sender for all outgoing messages
@@ -305,16 +309,11 @@ pub async fn run_committee_mode(
                 }
             }
             CommitteeState::Ready => {
-                // Start handling signing requests
-                loop {
-                    if let Some(request) = protocol.signing_request.take(){
+                // Start the signing session
+                signing.start(party_id, &server_addr).await?;
 
-                    }
-
-                    // Establish signing quorum
-                    
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                }
+                // After session ends, end committee session
+                committee_state = CommitteeState::AwaitingMembers;
             }
             
         }
@@ -486,39 +485,12 @@ pub async fn discover_committee_members() -> Result<HashSet<u16>, Error> {
     Ok(committee)
 }
 
-/// Waits for and receives signing requests
-async fn await_signing_request() -> Result<Option<SigningRequest>, Error> {
-    println!("Waiting for signing requests...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    /*
-    // Connect to websocket server
-    let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
-        "ws://localhost:8080",
-        0, // Use 0 for monitoring requests
-    )
-    .await?;
-
-    let (mut receiver, _sender) = delivery.split();
-
-
-    // Process incoming messages
-    match receiver.next().await? {
-        ControlMessage::SigningRequest { message, initiator } => {
-            Ok(Some(SigningRequest { message, initiator }))
-        }
-        _ => Ok(None),
-    }*/
-    Ok(None)
-}
-
 /// Structure representing a signing request
 #[derive(Debug)]
 pub struct SigningRequest {
     pub message: String,
     pub initiator: u16,
 }
-
-
 
 /// Execution ID coordination data
 #[derive(Debug)]
