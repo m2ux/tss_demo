@@ -83,7 +83,6 @@ state_machine! {
 
 /// Data associated with the state machine
 pub struct SigningEnv {
-    party_id: Option<u16>,
     received_signatures: HashMap<u16, Signature<Secp256k1>>,
     signing_candidates: HashSet<u16>,
     received_candidates: HashMap<u16, HashSet<u16>>,
@@ -97,7 +96,6 @@ pub struct SigningEnv {
 impl SigningEnv {
     pub fn new() -> Self {
         Self {
-            party_id: None,
             received_signatures: HashMap::new(),
             signing_candidates: HashSet::new(),
             received_candidates: HashMap::new(),
@@ -191,32 +189,57 @@ impl Signing {
             // Pre-transition actions
             match (&self.fsm.state(), last_event) {
                 (signing_protocol::State::TidyUp, _) => {
+                    println!("Transition: TidyUp state - Cleaning up and exiting");
                     // Tidy-up goes here
                     return Ok(());
                 }
 
                 (signing_protocol::State::Idle, Input::SignRequestReceived) => {
+                    println!("Transition: Idle -> CollectingCandidates (SignRequestReceived)");
+                    println!("- Clearing previous candidates and setting collection deadline");
                     context.signing_candidates.clear();
-                    context.collection_deadline = Some(Instant::now() + Duration::from_secs(30));
+                    context.set_deadline();
 
                     // Add self to candidates and broadcast availability
                     context.signing_candidates.insert(party_id);
+                    println!("- Added self (party_id: {}) to candidates", party_id);
                     sender
                         .broadcast(SigningProtocolMessage::SigningAvailable)
                         .await?
                 }
                 (signing_protocol::State::CollectingCandidates, Input::CandidateAvailable) => {
-                    context.last_event = context.is_deadline_elapsed().then(|| {
+                    let deadline_elapsed = context.is_deadline_elapsed();
+                    println!("Transition: CollectingCandidates state (CandidateAvailable)");
+                    println!("- Collection deadline elapsed: {}", deadline_elapsed);
+                    context.last_event = deadline_elapsed.then(|| {
                         context.signing_candidates.insert(party_id);
+                        println!(
+                            "- Deadline reached, adding self (party_id: {}) to candidates",
+                            party_id
+                        );
+                        println!("- Current candidates: {:?}", context.signing_candidates);
                         Input::CollectionTimeout
                     });
                 }
                 (signing_protocol::State::CollectingCandidates, _) => {
+                    let deadline_elapsed = context.is_deadline_elapsed();
+                    println!("Transition: CollectingCandidates state (checking timeout)");
+                    println!("- Collection deadline elapsed: {}", deadline_elapsed);
                     context.last_event = context
                         .is_deadline_elapsed()
                         .then_some(Input::CollectionTimeout);
                 }
                 (signing_protocol::State::ComparingCandidates, Input::CandidateSetReceived) => {
+                    println!("Transition: ComparingCandidates state (CandidateSetReceived)");
+                    println!(
+                        "- Received candidates count: {}",
+                        context.received_candidates.len()
+                    );
+                    println!(
+                        "- Expected candidates count: {}",
+                        context.signing_candidates.len()
+                    );
+
                     // Check if we have received candidate sets from all participants
                     if context.received_candidates.len() == context.signing_candidates.len() {
                         // Compare all received candidate sets
@@ -225,12 +248,16 @@ impl Signing {
                             .values()
                             .all(|set| set == &context.signing_candidates);
 
+                        println!("- All candidate sets match: {}", all_sets_match);
+
                         if all_sets_match {
+                            println!("- Broadcasting quorum approval");
                             // Broadcast approval
                             sender
                                 .broadcast(SigningProtocolMessage::QuorumApproved)
                                 .await?
                         } else {
+                            println!("- Broadcasting quorum decline due to mismatched sets");
                             // Broadcast decline
                             sender
                                 .broadcast(SigningProtocolMessage::QuorumDeclined)
@@ -239,6 +266,10 @@ impl Signing {
                     }
                 }
                 (signing_protocol::State::CollectingApprovals, Input::QuorumApproved) => {
+                    println!("Transition: CollectingApprovals state (QuorumApproved)");
+                    println!("- Approvals received: {}", context.quorum_approved.len());
+                    println!("- Required approvals: {}", context.signing_candidates.len());
+
                     // Check if we have approval from all candidates
                     if context.quorum_approved.len() == context.signing_candidates.len() {
                         // Select the lowest-ordered 3 members
@@ -249,8 +280,14 @@ impl Signing {
                         let signing_parties =
                             &ordered_candidates[..min(3, ordered_candidates.len())];
 
+                        println!("- Selected signing parties: {:?}", signing_parties);
+
                         // Perform signing
                         if let Some(message) = &context.current_message.take() {
+                            println!(
+                                "- Starting signing process for message of length: {}",
+                                message.len()
+                            );
                             match handle_signing_request(
                                 message,
                                 signing_parties,
@@ -260,6 +297,7 @@ impl Signing {
                             .await
                             {
                                 Ok(signature) => {
+                                    println!("- Signing successful, broadcasting signature share");
                                     // Store our signature
                                     context.received_signatures.insert(party_id, signature);
                                     // Broadcast our signature
@@ -272,6 +310,7 @@ impl Signing {
                                     context.event(Input::SigningComplete);
                                 }
                                 Err(_) => {
+                                    println!("- Signing failed, declining quorum");
                                     context.event(Input::QuorumDeclined);
                                 }
                             }
@@ -305,6 +344,10 @@ impl Signing {
                     }
                 }
             }
+
+            // Prevent tight loop
+            drop(context);
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 }

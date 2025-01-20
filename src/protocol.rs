@@ -1,5 +1,6 @@
 use crate::error::Error;
 use crate::network::WsDelivery;
+use crate::signing::Signing;
 use crate::storage::KeyStorage;
 use cggmp21::key_share::AuxInfo;
 use cggmp21::{
@@ -13,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
-use crate::signing::Signing;
 
 /// Represents the various stages of committee initialization and operation
 ///
@@ -51,6 +52,8 @@ enum CommitteeState {
     /// Transitions to Ready when all members have their key shares.
     AwaitingKeyGen,
 
+    /// Wait for all committee members to indicate readiness
+    WaitForReady,
     /// Final operational state where the committee is fully initialized
     /// and ready to process signing requests.
     Ready,
@@ -91,7 +94,10 @@ pub enum ControlMessage {
 
     /// Message containing a party's share of the signature
     /// - share: The signature share data
-    SignatureShare { share: Vec<u8> },
+    //SignatureShare { share: Vec<u8> },
+
+    /// Indicate that the protocol is ready to sign
+    ReadyToSign,
 }
 
 /// Defines the structure and types of control messages used for committee coordination
@@ -103,7 +109,7 @@ pub enum CommitteeSession {
     Control,
     Protocol,
     SigningSession,
-    Signing
+    Signing,
 }
 
 impl From<CommitteeSession> for u16 {
@@ -118,6 +124,7 @@ struct Protocol {
     pub committee_members: HashSet<u16>,
     pub aux_info_ready: HashSet<u16>,
     pub keygen_ready: HashSet<u16>,
+    pub signing_ready: HashSet<u16>,
     pub execution_id_coord: ExecutionIdCoordination,
     pub signing_request: Option<SigningRequest>,
 }
@@ -131,6 +138,7 @@ impl Protocol {
             committee_members,
             aux_info_ready: HashSet::new(),
             keygen_ready: HashSet::new(),
+            signing_ready: HashSet::new(),
             execution_id_coord: ExecutionIdCoordination::new(),
             signing_request: None,
         }
@@ -138,16 +146,14 @@ impl Protocol {
 }
 
 /// Runs the application in committee mode, ie participating in the signing committee
-pub async fn run_committee_mode(
-    server_addr: String,
-    party_id: u16,
-    signer_id: Option<u16>,
-) -> Result<(), Error> {
+pub async fn run_committee_mode(server_addr: String, party_id: u16) -> Result<(), Error> {
     println!("Starting in committee mode with party ID: {}", party_id);
 
     // Initialize storage
-    let storage =
-        KeyStorage::new(format!("keys_{}", party_id), "a very secret key that should be properly secured")?;
+    let storage = KeyStorage::new(
+        format!("keys_{}", party_id),
+        "a very secret key that should be properly secured",
+    )?;
 
     // Initialize control message connection
     let delivery =
@@ -156,7 +162,7 @@ pub async fn run_committee_mode(
 
     // Setup a signing session
     let mut signing = Signing::new(storage.clone()).await?;
-    
+
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     // Get sender for all outgoing messages
@@ -212,7 +218,7 @@ pub async fn run_committee_mode(
 
                     let execution_id = protocol.execution_id_coord.proposed_id.clone().unwrap();
                     println!("Proposing execution ID: {}", &execution_id);
-                    
+
                     sender
                         .broadcast(ControlMessage::ExecutionIdProposal { execution_id })
                         .await
@@ -289,7 +295,7 @@ pub async fn run_committee_mode(
                     party_id,
                     &protocol.committee_members,
                     &server_addr,
-                    ExecutionId::new(&execution_id.as_bytes()),
+                    ExecutionId::new(execution_id.as_bytes()),
                 )
                 .await?;
                 storage.save("key_share", &key_share)?;
@@ -304,10 +310,25 @@ pub async fn run_committee_mode(
             }
             CommitteeState::AwaitingKeyGen => {
                 if protocol.keygen_ready.len() >= 5 {
-                    println!("Key generation complete. Ready for signing operations.");
+                    println!("Key generation complete");
+
+                    sender
+                        .broadcast(ControlMessage::ReadyToSign)
+                        .await
+                        .map_err(Error::Network)?;
+
+                    protocol.signing_ready.insert(party_id);
+                    committee_state = CommitteeState::WaitForReady;
+                }
+            }
+
+            CommitteeState::WaitForReady => {
+                if protocol.signing_ready.len() >= 5 {
+                    println!("Committee ready for signing operations.");
                     committee_state = CommitteeState::Ready;
                 }
             }
+
             CommitteeState::Ready => {
                 // Start the signing session
                 signing.start(party_id, &server_addr).await?;
@@ -315,8 +336,10 @@ pub async fn run_committee_mode(
                 // After session ends, end committee session
                 committee_state = CommitteeState::AwaitingMembers;
             }
-            
         }
+        // Prevent tight loop
+        //drop(protocol);
+        //tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -352,6 +375,10 @@ async fn handle_message(
         ControlMessage::KeyGenReady => {
             protocol.keygen_ready.insert(pid);
             println!("Party {} completed key generation", pid);
+        }
+        ControlMessage::ReadyToSign => {
+            protocol.signing_ready.insert(pid);
+            println!("Party {} is ready to sign", pid);
         }
         _ => {
             println!("Received unhandled message type from party {}", pid);

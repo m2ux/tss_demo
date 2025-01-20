@@ -236,8 +236,8 @@ where
 
         Ok(())
     }
-    
-    pub fn get_party_id(&self) -> u16{
+
+    pub fn get_party_id(&self) -> u16 {
         self.party_id
     }
 }
@@ -575,23 +575,21 @@ where
         match poll_result {
             std::task::Poll::Ready(Some(data)) => {
                 match bincode::deserialize::<WireMessage>(&data) {
-                    Ok(wire_msg) => {
-                        match bincode::deserialize(&wire_msg.payload) {
-                            Ok(msg) => std::task::Poll::Ready(Some(Ok(round_based::Incoming {
-                                id: wire_msg.id,
-                                sender: wire_msg.sender,
-                                msg,
-                                msg_type: wire_msg
-                                    .receiver
-                                    .map_or(round_based::MessageType::Broadcast, |_| {
-                                        round_based::MessageType::P2P
-                                    }),
-                            }))),
-                            Err(_) => std::task::Poll::Ready(Some(Err(NetworkError::Connection(
-                                "Failed to deserialize protocol message".into(),
-                            )))),
-                        }
-                    }
+                    Ok(wire_msg) => match bincode::deserialize(&wire_msg.payload) {
+                        Ok(msg) => std::task::Poll::Ready(Some(Ok(round_based::Incoming {
+                            id: wire_msg.id,
+                            sender: wire_msg.sender,
+                            msg,
+                            msg_type: wire_msg
+                                .receiver
+                                .map_or(round_based::MessageType::Broadcast, |_| {
+                                    round_based::MessageType::P2P
+                                }),
+                        }))),
+                        Err(_) => std::task::Poll::Ready(Some(Err(NetworkError::Connection(
+                            "Failed to deserialize protocol message".into(),
+                        )))),
+                    },
                     Err(_) => std::task::Poll::Ready(Some(Err(NetworkError::Connection(
                         "Failed to deserialize wire message".into(),
                     )))),

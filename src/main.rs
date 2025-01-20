@@ -59,8 +59,8 @@ mod network;
 mod protocol;
 mod server;
 mod service;
-mod storage;
 mod signing;
+mod storage;
 
 use clap::Parser;
 use error::Error;
@@ -114,10 +114,6 @@ struct Args {
     /// WebSocket server address
     #[arg(short, long)]
     server: String,
-
-    /// Signer index for committee mode
-    #[arg(long)]
-    signer_index: Option<u16>,
 }
 
 /// Main entry point for the CGGMP21 demo application
@@ -151,7 +147,7 @@ async fn main() -> Result<(), Error> {
             // Select operating mode
             match mode {
                 OperationMode::Committee => {
-                    run_committee_mode(args.server, party_id, args.signer_index).await?;
+                    run_committee_mode(args.server, party_id).await?;
                 }
                 OperationMode::Service(message) => {
                     run_service_mode(args.server, party_id, message).await?;
