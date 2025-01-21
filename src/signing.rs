@@ -3,8 +3,9 @@ use crate::network;
 use crate::network::{WsDelivery, WsReceiver, WsSender};
 use crate::protocol::CommitteeSession;
 use crate::signing::signing_protocol::Input;
-use crate::storage::KeyStorage;
-use cggmp21::security_level::SecurityLevel128;
+use crate::storage::{KeyStorage, StorageError};
+use cggmp21::key_share::{AuxInfo, DirtyKeyShare};
+use cggmp21_keygen::key_share::{CoreKeyShare, Valid};
 use cggmp21::supported_curves::Secp256k1;
 use cggmp21::{ExecutionId, Signature};
 use futures_util::StreamExt;
@@ -103,7 +104,7 @@ impl SigningEnv {
             current_message: None,
             collection_deadline: None,
             last_event: None,
-            signing_timeout: Duration::from_secs(30),
+            signing_timeout: Duration::from_secs(10),
         }
     }
 
@@ -155,7 +156,7 @@ impl Signing {
         let delivery = WsDelivery::<SigningProtocolMessage>::connect(
             server_addr,
             party_id,
-            CommitteeSession::SigningSession,
+            CommitteeSession::SigningControl,
         )
         .await?;
         let (receiver, sender) = Delivery::split(delivery);
@@ -180,21 +181,15 @@ impl Signing {
             // Acquire a context lock
             let mut context = self.context.write().await;
 
-            // Detect an incoming events
-            let last_event = match context.last_event.take() {
-                Some(event) => event,
-                None => continue,
-            };
-
             // Pre-transition actions
-            match (&self.fsm.state(), last_event) {
+            match (&self.fsm.state(), context.last_event.take()) {
                 (signing_protocol::State::TidyUp, _) => {
                     println!("Transition: TidyUp state - Cleaning up and exiting");
                     // Tidy-up goes here
                     return Ok(());
                 }
 
-                (signing_protocol::State::Idle, Input::SignRequestReceived) => {
+                (signing_protocol::State::Idle, Some(Input::SignRequestReceived)) => {
                     println!("Transition: Idle -> CollectingCandidates (SignRequestReceived)");
                     println!("- Clearing previous candidates and setting collection deadline");
                     context.signing_candidates.clear();
@@ -205,31 +200,24 @@ impl Signing {
                     println!("- Added self (party_id: {}) to candidates", party_id);
                     sender
                         .broadcast(SigningProtocolMessage::SigningAvailable)
-                        .await?
+                        .await?;
+
+                    context.event(Input::SignRequestReceived);
                 }
-                (signing_protocol::State::CollectingCandidates, Input::CandidateAvailable) => {
-                    let deadline_elapsed = context.is_deadline_elapsed();
-                    println!("Transition: CollectingCandidates state (CandidateAvailable)");
-                    println!("- Collection deadline elapsed: {}", deadline_elapsed);
-                    context.last_event = deadline_elapsed.then(|| {
-                        context.signing_candidates.insert(party_id);
-                        println!(
-                            "- Deadline reached, adding self (party_id: {}) to candidates",
-                            party_id
-                        );
-                        println!("- Current candidates: {:?}", context.signing_candidates);
-                        Input::CollectionTimeout
-                    });
-                }
+
                 (signing_protocol::State::CollectingCandidates, _) => {
-                    let deadline_elapsed = context.is_deadline_elapsed();
-                    println!("Transition: CollectingCandidates state (checking timeout)");
-                    println!("- Collection deadline elapsed: {}", deadline_elapsed);
-                    context.last_event = context
-                        .is_deadline_elapsed()
-                        .then_some(Input::CollectionTimeout);
+                    // Check for timeout
+                    if context.is_deadline_elapsed() {
+                        println!("Collection timeout");
+                        context.event(Input::CollectionTimeout);
+                    }
                 }
-                (signing_protocol::State::ComparingCandidates, Input::CandidateSetReceived) => {
+
+                (
+                    signing_protocol::State::ComparingCandidates,
+                    Some(Input::CandidateSetReceived),
+                ) => {
+                    tokio::time::sleep(Duration::from_millis((10 * party_id) as u64)).await;
                     println!("Transition: ComparingCandidates state (CandidateSetReceived)");
                     println!(
                         "- Received candidates count: {}",
@@ -237,16 +225,17 @@ impl Signing {
                     );
                     println!(
                         "- Expected candidates count: {}",
-                        context.signing_candidates.len()
+                        context.signing_candidates.len() - 1
                     );
 
                     // Check if we have received candidate sets from all participants
-                    if context.received_candidates.len() == context.signing_candidates.len() {
-                        // Compare all received candidate sets
+                    if context.received_candidates.len() == context.signing_candidates.len() - 1 {
+                        // Compare all received candidate sets, excluding self
                         let all_sets_match = context
                             .received_candidates
-                            .values()
-                            .all(|set| set == &context.signing_candidates);
+                            .iter()
+                            .filter(|(&pid, _)| pid != party_id)
+                            .all(|(_, set)| set == &context.signing_candidates);
 
                         println!("- All candidate sets match: {}", all_sets_match);
 
@@ -255,9 +244,20 @@ impl Signing {
                             // Broadcast approval
                             sender
                                 .broadcast(SigningProtocolMessage::QuorumApproved)
-                                .await?
+                                .await?;
+                            context.event(Input::QuorumApproved);
                         } else {
                             println!("- Broadcasting quorum decline due to mismatched sets");
+                            println!("- Reference set: {:?}", context.signing_candidates);
+                            // Print each mismatched set with its party ID
+                            for (party_id, candidate_set) in &context.received_candidates {
+                                if candidate_set != &context.signing_candidates {
+                                    println!(
+                                        "- Mismatched set from party {}: {:?}",
+                                        party_id, candidate_set
+                                    );
+                                }
+                            }
                             // Broadcast decline
                             sender
                                 .broadcast(SigningProtocolMessage::QuorumDeclined)
@@ -265,13 +265,17 @@ impl Signing {
                         }
                     }
                 }
-                (signing_protocol::State::CollectingApprovals, Input::QuorumApproved) => {
+                (signing_protocol::State::CollectingApprovals, Some(Input::QuorumApproved)) => {
+                    tokio::time::sleep(Duration::from_millis((10 * party_id) as u64)).await;
                     println!("Transition: CollectingApprovals state (QuorumApproved)");
                     println!("- Approvals received: {}", context.quorum_approved.len());
-                    println!("- Required approvals: {}", context.signing_candidates.len());
+                    println!(
+                        "- Further required approvals: {}",
+                        context.signing_candidates.len() - 1
+                    );
 
                     // Check if we have approval from all candidates
-                    if context.quorum_approved.len() == context.signing_candidates.len() {
+                    if context.quorum_approved.len() == context.signing_candidates.len() - 1 {
                         // Select the lowest-ordered 3 members
                         let mut ordered_candidates: Vec<u16> =
                             context.signing_candidates.iter().cloned().collect();
@@ -309,8 +313,8 @@ impl Signing {
                                         .map_err(Error::Network)?;
                                     context.event(Input::SigningComplete);
                                 }
-                                Err(_) => {
-                                    println!("- Signing failed, declining quorum");
+                                Err(e) => {
+                                    println!("- Signing failed, {}", e);
                                     context.event(Input::QuorumDeclined);
                                 }
                             }
@@ -345,9 +349,8 @@ impl Signing {
                 }
             }
 
-            // Prevent tight loop
-            drop(context);
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            //drop(context);
+            //tokio::time::sleep(Duration::from_millis(1)).await;
         }
     }
 }
@@ -372,8 +375,21 @@ async fn handle_messages(
                 context.current_message = Some(message);
                 Input::SignRequestReceived
             }
-            SigningProtocolMessage::SigningAvailable => Input::CandidateAvailable,
+            SigningProtocolMessage::SigningAvailable => {
+                if !context.is_deadline_elapsed() {
+                    context.signing_candidates.insert(pid);
+                    println!(
+                        "- Adding party {}. Available candidates: {:?} ",
+                        pid, context.signing_candidates
+                    );
+                    Input::CandidateAvailable
+                } else {
+                    println!("Not adding party {} to available candidates (timeout)", pid);
+                    Input::CollectionTimeout
+                }
+            }
             SigningProtocolMessage::CandidateSet { candidates } => {
+                println!("- Adding candidate set from party {}", pid);
                 context.received_candidates.insert(pid, candidates);
                 Input::CandidateSetReceived
             }
@@ -381,9 +397,16 @@ async fn handle_messages(
                 context.quorum_approved.insert(pid);
                 Input::QuorumApproved
             }
-            SigningProtocolMessage::QuorumDeclined => Input::QuorumDeclined,
-            SigningProtocolMessage::EndSigning => Input::EndSigning,
+            SigningProtocolMessage::QuorumDeclined => {
+                println!("Quorum declined by party {}", pid);
+                Input::QuorumDeclined
+            }
+            SigningProtocolMessage::EndSigning => {
+                println!("Signing-ended by party {}", pid);
+                Input::EndSigning
+            }
             SigningProtocolMessage::SignatureShare { sig_share } => {
+                println!("Received signature share from party {}", pid);
                 context.received_signatures.insert(pid, sig_share);
                 Input::EndSigning
             }
@@ -418,7 +441,7 @@ async fn handle_messages(
 
 /// Handles an incoming signing request
 async fn handle_signing_request(
-    message: &Vec<u8>,
+    message: &[u8],
     signing_parties: &[u16],
     storage: &KeyStorage,
     party_id: u16,
@@ -427,21 +450,19 @@ async fn handle_signing_request(
 
     // Load the stored data
     let execution_id = storage.load::<String>("execution_id")?;
-    let key_share = storage.load::<cggmp21::KeyShare<Secp256k1, SecurityLevel128>>("key_share")?;
-
+    let key_share = storage.load_key_share("key_share")?;
     let execution_id = ExecutionId::new(execution_id.as_bytes());
-
-    // Hash the message to be signed
     let data_to_sign = cggmp21::DataToSign::digest::<Sha256>(message);
 
     let delivery = WsDelivery::<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>::connect(
         "ws://localhost:8080",
         party_id,
-        CommitteeSession::SigningSession,
+        CommitteeSession::Signing,
     )
     .await?;
 
     // Generate the signature
+    println!("Generating signature..");
     let signature = cggmp21::signing(execution_id, party_id, signing_parties, &key_share)
         .sign(&mut OsRng, MpcParty::connected(delivery), data_to_sign)
         .await

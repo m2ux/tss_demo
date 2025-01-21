@@ -39,6 +39,10 @@ use aes_gcm::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use cggmp21::key_share::DirtyKeyShare;
+use cggmp21::KeyShare;
+use cggmp21::supported_curves::Secp256k1;
+use cggmp21_keygen::key_share::{CoreKeyShare, Valid};
 
 /// Errors that can occur during storage operations.
 ///
@@ -55,9 +59,13 @@ pub enum StorageError {
     #[error("Encryption error")]
     Encryption,
 
-    /// Data serialization or deserialization errors
+    /// Data serialization errors
     #[error("Serialization error: {0}")]
-    Serialization(#[from] bincode::Error),
+    Serialization(#[from] rmp_serde::decode::Error),
+
+    /// Data deserialization errors
+    #[error("Deserialization error: {0}")]
+    Deserialization(#[from] rmp_serde::encode::Error),
 }
 
 /// Secure storage for sensitive data with encryption support.
@@ -78,9 +86,9 @@ pub enum StorageError {
 #[derive(Clone)]
 pub struct KeyStorage {
     /// Base directory for storing encrypted files
-    storage_path: PathBuf,
+    pub(crate) storage_path: PathBuf,
     /// AES-256-GCM cipher instance for encryption/decryption
-    cipher: Aes256Gcm,
+    pub(crate) cipher: Aes256Gcm,
 }
 
 impl KeyStorage {
@@ -151,7 +159,7 @@ impl KeyStorage {
     /// - `StorageError::Encryption`: If encryption fails
     /// - `StorageError::Io`: If writing to file fails
     pub fn save<T: Serialize>(&self, key_id: &str, data: &T) -> Result<(), StorageError> {
-        let serialized = bincode::serialize(data)?;
+        let serialized = rmp_serde::to_vec(&data)?;
         let nonce = Nonce::from_slice(b"unique nonce"); // In production, generate a unique nonce
 
         let encrypted = self
@@ -195,13 +203,44 @@ impl KeyStorage {
         let path = self.storage_path.join(format!("{}.key", key_id));
         let encrypted = std::fs::read(path)?;
 
-        let nonce = Nonce::from_slice(b"unique nonce"); // Must match the nonce used for encryption
+        let nonce = Nonce::from_slice(b"unique nonce");
         let decrypted = self
             .cipher
             .decrypt(nonce, encrypted.as_ref())
             .map_err(|_| StorageError::Encryption)?;
 
-        Ok(bincode::deserialize(&decrypted)?)
+        Ok(rmp_serde::from_slice(&decrypted)?)
+    }
+
+    pub fn save_key_share(&self, key_id: &str, share: &KeyShare<Secp256k1>) -> Result<(), StorageError> {
+        // Serialize to a Vec<u8> using pot
+        let serialized = rmp_serde::to_vec(&share)?;
+        let nonce = Nonce::from_slice(b"unique nonce");
+
+        let encrypted = self
+            .cipher
+            .encrypt(nonce, serialized.as_ref())
+            .map_err(|_| StorageError::Encryption)?;
+
+        let path = self.storage_path.join(format!("{}.key", key_id));
+        std::fs::write(path, encrypted)?;
+
+        Ok(())
+    }
+
+    pub fn load_key_share(&self, key_id: &str) -> Result<KeyShare<Secp256k1>, StorageError> {
+        let path = self.storage_path.join(format!("{}.key", key_id));
+        let encrypted = std::fs::read(path)?;
+
+        let nonce = Nonce::from_slice(b"unique nonce");
+        let decrypted = self
+            .cipher
+            .decrypt(nonce, encrypted.as_ref())
+            .map_err(|_| StorageError::Encryption)?;
+
+        // Deserialize using pot
+        let key_share: KeyShare<Secp256k1> = rmp_serde::from_slice(&decrypted)?;
+        Ok(key_share)
     }
 }
 
@@ -416,5 +455,19 @@ mod tests {
         // Drop temp_dir and verify cleanup
         drop(temp_dir);
         assert!(!key_path.exists());
+    }
+
+    #[test]
+    /// Test basic pot serialization/deserialization of CoreKeyShare bytes
+    fn test_core_key_share_bytes() {
+        // Take a sample CoreKeyShare and verify pot serialization
+        let sample_bytes = vec![1, 2, 3, 4]; // Replace with actual CoreKeyShare bytes
+        let result = pot::to_vec(&sample_bytes);
+        assert!(result.is_ok(), "Should serialize bytes successfully");
+
+        if let Ok(serialized) = result {
+            let deserialized: Vec<u8> = pot::from_slice(&serialized).unwrap();
+            assert_eq!(sample_bytes, deserialized, "Serialized and deserialized bytes should match");
+        }
     }
 }

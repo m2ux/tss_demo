@@ -3,10 +3,8 @@ use crate::network::WsDelivery;
 use crate::signing::Signing;
 use crate::storage::KeyStorage;
 use cggmp21::key_share::AuxInfo;
-use cggmp21::{
-    key_refresh::AuxOnlyMsg, keygen::ThresholdMsg, security_level::SecurityLevel128,
-    supported_curves::Secp256k1, ExecutionId, PregeneratedPrimes,
-};
+use cggmp21::{key_refresh::AuxOnlyMsg, keygen::ThresholdMsg, security_level::SecurityLevel128, supported_curves::Secp256k1, ExecutionId, KeyShare, PregeneratedPrimes};
+use cggmp21_keygen::key_share::CoreKeyShare;
 use futures::StreamExt;
 use rand_core::OsRng;
 use round_based::{Delivery, Incoming, MpcParty};
@@ -108,7 +106,7 @@ pub enum ControlMessage {
 pub enum CommitteeSession {
     Control,
     Protocol,
-    SigningSession,
+    SigningControl,
     Signing,
 }
 
@@ -163,7 +161,7 @@ pub async fn run_committee_mode(server_addr: String, party_id: u16) -> Result<()
     // Setup a signing session
     let mut signing = Signing::new(storage.clone()).await?;
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Get sender for all outgoing messages
     let (mut receiver, mut sender) = Delivery::split(delivery);
@@ -291,15 +289,23 @@ pub async fn run_committee_mode(server_addr: String, party_id: u16) -> Result<()
                 // Perform distributed key generation
                 let execution_id = storage.load::<String>("execution_id")?;
 
-                let key_share = generate_key_share(
+                let incomplete_key_share = generate_key_share(
                     party_id,
                     &protocol.committee_members,
                     &server_addr,
                     ExecutionId::new(execution_id.as_bytes()),
                 )
                 .await?;
-                storage.save("key_share", &key_share)?;
 
+                println!("Load aux info");
+                let aux_info = storage.load::<AuxInfo>("aux_info")?;
+
+                // Reconstruct the key share
+                let key_share = cggmp21::KeyShare::from_parts((incomplete_key_share, aux_info))
+                    .map_err(|e| Error::Protocol(e.to_string()))?;
+                
+                storage.save_key_share("key_share", &key_share)?;
+                
                 sender
                     .broadcast(ControlMessage::KeyGenReady)
                     .await
@@ -337,9 +343,6 @@ pub async fn run_committee_mode(server_addr: String, party_id: u16) -> Result<()
                 committee_state = CommitteeState::AwaitingMembers;
             }
         }
-        // Prevent tight loop
-        //drop(protocol);
-        //tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -421,7 +424,7 @@ async fn generate_key_share(
     committee: &HashSet<u16>,
     server_addr: &str,
     eid: ExecutionId<'_>,
-) -> Result<Vec<u8>, Error> {
+) -> Result<CoreKeyShare<Secp256k1>, Error> {
     println!("Starting distributed key generation for party {}", party_id);
 
     // Create a new delivery instance for key generation
@@ -440,10 +443,7 @@ async fn generate_key_share(
         .await
         .map_err(|e| Error::Protocol(e.to_string()))?;
 
-    // Serialize the key share
-    let key_share = bincode::serialize(&keygen).map_err(Error::Serialization)?;
-
-    Ok(key_share)
+    Ok(keygen)
 }
 
 /// Discovers currently available committee members

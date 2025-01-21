@@ -54,10 +54,10 @@ state_machine! {
     /// - RequestSent: Triggers transition from SendingRequest to Exit
     /// - Failed: Triggers transition to Exit from any state
     #[derive(Debug)]
-    service(Initial)
+    service(SendingRequest)
 
     Initial => {
-        CommitteeReady => SendingRequest[SendRequest],
+        CommitteeReady => SendingRequest,
         Failed => Exit
     },
 
@@ -119,15 +119,6 @@ impl ServiceEnv {
             self.ready_sign_received = Some(Instant::now());
         }
     }
-
-    /// Checks if enough time (10 seconds) has passed since receiving ReadyToSign.
-    fn is_ready_to_sign(&self) -> bool {
-        self.ready_sign_received
-            .map(|received_time| {
-                Instant::now().duration_since(received_time) >= Duration::from_secs(10)
-            })
-            .unwrap_or(false)
-    }
 }
 
 /// Main service structure managing the signing request process.
@@ -159,7 +150,7 @@ impl Service {
     /// # Returns
     /// * `Result<(), Error>` - Success or error status
     async fn run(&mut self, server_addr: String, party_id: u16) -> Result<(), Error> {
-        // Create delivery instance for control messages
+        // Create delivery instance for protocol control messages
         let control_delivery = WsDelivery::<ControlMessage>::connect(
             &server_addr,
             party_id,
@@ -173,7 +164,7 @@ impl Service {
         let signing_delivery = WsDelivery::<SigningProtocolMessage>::connect(
             &server_addr,
             party_id,
-            CommitteeSession::SigningSession,
+            CommitteeSession::SigningControl,
         )
         .await?;
 
@@ -185,12 +176,17 @@ impl Service {
             monitor_ready_sign_messages(context_clone, control_receiver).await
         });
 
+        // Raise an immediate committee-ready event
+        let mut context = self.context.write().await;
+        context.event(Input::CommitteeReady);
+        drop(context);
+        
         // Run the main service loop
         let result = self.run_machine(signing_sender).await;
-
+        
         // Clean up
         monitor_handle.abort();
-
+        
         result
     }
 
@@ -204,45 +200,46 @@ impl Service {
     async fn run_machine(
         &mut self,
         mut sender: WsSender<SigningProtocolMessage>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error> {         
         loop {
             let mut context = self.context.write().await;
 
-            // Check for timeout
-            if context.is_timeout() {
-                context.event(Input::Failed);
-            }
+            // Detect an incoming events
+            let last_event = match context.last_event.take() {
+                Some(event) => event,
+                None => continue,
+            };
+            
+            match (&self.fsm.state(), last_event) {
+                (service::State::Initial, _) => {
+                    println!("Committee ready");
+                }
+                (service::State::SendingRequest, _) => {
+                    println!("Sending signature request");
+                    // Create and send the sign request
+                    let request = SigningProtocolMessage::SignRequest {
+                        message: context.message.as_bytes().to_vec(),
+                    };
 
-            // Check if ready to sign
-            if context.is_ready_to_sign() {
-                context.event(Input::CommitteeReady);
-            }
-
-            // Process any pending events
-            if let Some(event) = context.last_event.take() {
-                if let Ok(Some(output)) = self.fsm.consume(&event) {
-                    match (&self.fsm.state(), output) {
-                        (service::State::SendingRequest, service::Output::SendRequest) => {
-                            // Create and send the sign request
-                            let request = SigningProtocolMessage::SignRequest {
-                                message: context.message.as_bytes().to_vec(),
-                            };
-
-                            // Broadcast the request
-                            if let Err(e) = sender.broadcast(request).await {
-                                context.event(Input::Failed);
-                                return Err(Error::Network(e));
-                            }
-                            context.event(Input::RequestSent);
-                        }
-                        (service::State::Exit, _) => {
-                            return Ok(());
-                        }
-                        _ => {}
+                    // Broadcast the request
+                    if let Err(e) = sender.broadcast(request).await {
+                        context.event(Input::Failed);
+                        return Err(Error::Network(e));
                     }
+                    context.event(Input::RequestSent);
+                }
+                (service::State::Exit, _) => {
+                    return Ok(());
                 }
             }
 
+            // Perform state transition and perform output actions
+            if let Some(last_event) = context.last_event.take() {
+                if let Ok(Some(output_event)) = self.fsm.consume(&last_event) {
+                    // Post-transition actions
+                }
+            }
+            
             // Prevent tight loop
             drop(context);
             tokio::time::sleep(Duration::from_millis(100)).await;
