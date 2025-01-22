@@ -238,7 +238,7 @@ impl Signing {
                 (signing_protocol::State::CollectingCandidates, _) => {
                     // Check for timeout
                     if context.is_deadline_elapsed() {
-                        println!("Collection timeout");
+                        println!("- Collection timeout");
                         context.event(Input::CollectionTimeout);
                     }
                 }
@@ -327,7 +327,7 @@ impl Signing {
                     // Perform signing
                     // If we are not a signatory then quite the process
                     if !context.signing_parties.contains(&party_id) {
-                        println!("No further participation in the signing process");
+                        println!("- No further participation in the signing process");
                         context.event(Input::SigningComplete);
                     }else if let Some(message) = &context.current_message.take() {
                         println!(
@@ -360,7 +360,7 @@ impl Signing {
                                     let r_bytes = &signature.r.to_be_bytes();
                                     let s_bytes = &signature.s.to_be_bytes();
 
-                                    println!("Signature [r,s]: [{:#?},{:#?}]", hex::encode(r_bytes), hex::encode(s_bytes));
+                                    println!("- Signature [r,s]: [{:#?},{:#?}]", hex::encode(r_bytes), hex::encode(s_bytes));
                                     context.event(Input::SigningComplete);
                                 }
                                 Err(e) => {
@@ -383,7 +383,7 @@ impl Signing {
                                     sig.r == first_sig.r && sig.s == first_sig.s
                                 });
 
-                            println!("Signature verification result: {}", all_match);
+                            println!("- Signature verification result: {}", all_match);
                             context.event(Input::VerificationComplete);
 
                             // Broadcast verification result
@@ -530,7 +530,7 @@ async fn handle_signing_request(
     party_id: u16,
     delivery: WsDelivery<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>,
 ) -> Result<Signature<Secp256k1>, Error> {
-    println!("Handling signing request from party ");
+    println!("- Handling signing request from party ");
 
     // Load the stored data
     let execution_id = storage.load::<String>("execution_id")?;
@@ -540,7 +540,7 @@ async fn handle_signing_request(
     let data_to_sign = cggmp21::DataToSign::digest::<Sha256>(message);
     
     // Generate the signature
-    println!("Generating signature..");
+    println!("- Generating signature..");
     let signature = cggmp21::signing(execution_id, party_id, signing_parties, &key_share)
         .sign(&mut OsRng, MpcParty::connected(delivery), data_to_sign)
         .await
