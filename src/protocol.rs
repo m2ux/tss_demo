@@ -330,7 +330,6 @@ pub async fn run_committee_mode(server_addr: String, party_id: u16) -> Result<()
 
             CommitteeState::WaitForReady => {
                 if protocol.signing_ready.len() >= 5 {
-                    println!("Committee ready for signing operations.");
                     committee_state = CommitteeState::Ready;
                 }
             }

@@ -42,6 +42,9 @@ pub enum SigningProtocolMessage {
     SignatureShare {
         sig_share: Signature<Secp256k1>,
     },
+    VerificationResult {
+        success: bool,
+    },
     /// End of signing session
     EndSigning,
 }
@@ -53,6 +56,7 @@ state_machine! {
     signing_protocol(Idle)
 
     Idle => {
+        Starting => Idle,
         SignRequestReceived => CollectingCandidates,
         EndSigning => TidyUp
     },
@@ -77,14 +81,13 @@ state_machine! {
         ReadyToSign => Signing,
         EndSigning => TidyUp
     },
-
-    PreSigning => {
-        DeliveryReady => Signing,
-        EndSigning => TidyUp
-    },
     
     Signing => {
-        SigningComplete => Idle,
+        SigningComplete => VerifyingSignatures,
+        EndSigning => TidyUp
+    },
+    VerifyingSignatures => {
+        VerificationComplete => Idle,
         EndSigning => TidyUp
     }
 }
@@ -170,10 +173,13 @@ impl Signing {
         .await?;
         let (receiver, sender) = Delivery::split(delivery);
 
+        // Starting event
+        self.context.write().await.last_event = Some(Input::Starting);
+        
         // Spawn message receiving task
         let message_handler = handle_messages(Arc::clone(&self.context), receiver);
         let run_handler = self.run_machine(sender);
-
+        
         tokio::try_join!(message_handler, run_handler)?;
         Ok(())
     }
@@ -199,6 +205,10 @@ impl Signing {
                     return Ok(());
                 }
 
+                (signing_protocol::State::Idle, Some(Input::Starting)) => {
+                    println!("Committee ready for signing operations.");
+                }
+                
                 (signing_protocol::State::Idle, Some(Input::SignRequestReceived)) => {
                     println!("Transition: Idle -> CollectingCandidates (SignRequestReceived)");
                     println!("- Clearing previous candidates and setting collection deadline");
@@ -361,6 +371,31 @@ impl Signing {
                         }
                     }
                 }
+                // In the run_machine match block, add:
+                (signing_protocol::State::VerifyingSignatures, _) => {
+                    // Check if we have signatures from all signing parties
+                    if context.received_signatures.len() == context.signing_parties.len() {
+                        // Get the first signature as reference
+                        if let Some((_, first_sig)) = context.received_signatures.iter().next() {
+                            // Compare all signatures with the first one
+                            let all_match = context.received_signatures.iter()
+                                .all(|(_, sig)| {
+                                    sig.r == first_sig.r && sig.s == first_sig.s
+                                });
+
+                            println!("Signature verification result: {}", all_match);
+                            context.event(Input::VerificationComplete);
+
+                            // Broadcast verification result
+                            sender
+                                .broadcast(SigningProtocolMessage::VerificationResult {
+                                    success: all_match,
+                                })
+                                .await
+                                .map_err(Error::Network)?;
+                        }
+                    }
+                }
                 _ => {}
             }
 
@@ -382,6 +417,7 @@ impl Signing {
                                 .map_err(Error::Network)?;
                         }
                         (signing_protocol::State::Idle, _) => {
+                            println!("Committee ready for signing operations.");
                             context.reset();
                         }
                         _ => {}
@@ -419,17 +455,17 @@ async fn handle_messages(
                 if !context.is_deadline_elapsed() {
                     context.signing_candidates.insert(pid);
                     println!(
-                        "- Adding party {}. Available candidates: {:?} ",
+                        "¬ Adding party {}. Available candidates: {:?} ",
                         pid, context.signing_candidates
                     );
                     Input::CandidateAvailable
                 } else {
-                    println!("Not adding party {} to available candidates (timeout)", pid);
+                    println!("¬ Not adding party {} to available candidates (timeout)", pid);
                     Input::CollectionTimeout
                 }
             }
             SigningProtocolMessage::CandidateSet { candidates } => {
-                println!("- Adding candidate set from party {}", pid);
+                println!("¬ Adding candidate set from party {}", pid);
                 context.received_candidates.insert(pid, candidates);
                 Input::CandidateSetReceived
             }
@@ -438,17 +474,24 @@ async fn handle_messages(
                 Input::QuorumApproved
             }
             SigningProtocolMessage::QuorumDeclined => {
-                println!("Quorum declined by party {}", pid);
+                println!("¬ Quorum declined by party {}", pid);
                 Input::QuorumDeclined
             }
             SigningProtocolMessage::EndSigning => {
-                println!("Signing-ended by party {}", pid);
+                println!("¬ Signing-ended by party {}", pid);
                 Input::EndSigning
             }
             SigningProtocolMessage::SignatureShare { sig_share } => {
-                println!("Received signature share from party {}", pid);
+                println!("¬ Received signature share from party {}", pid);
                 context.received_signatures.insert(pid, sig_share);
                 Input::EndSigning
+            }
+            SigningProtocolMessage::VerificationResult { success } => {
+                println!(
+                    "¬ Received verification result from party {}: {}",
+                    pid, success
+                );
+                Input::VerificationComplete
             }
         };
 
