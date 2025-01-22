@@ -98,6 +98,13 @@ pub enum ControlMessage {
     ReadyToSign,
 }
 
+/// Structure representing a signing request
+#[derive(Debug)]
+pub struct SigningRequest {
+    pub message: String,
+    pub initiator: u16,
+}
+
 /// Defines the structure and types of control messages used for committee coordination
 ///
 /// These messages handle committee formation, state synchronization, and signing operations
@@ -443,79 +450,6 @@ async fn generate_key_share(
         .map_err(|e| Error::Protocol(e.to_string()))?;
 
     Ok(keygen)
-}
-
-/// Discovers currently available committee members
-pub async fn discover_committee_members() -> Result<HashSet<u16>, Error> {
-    println!("Discovering available committee members...");
-
-    // Connect to the WebSocket server
-    let delivery = WsDelivery::<ControlMessage>::connect(
-        "ws://localhost:8080", // This should use the configured server address
-        0,
-        CommitteeSession::Protocol, // Use party ID 0 for discovery
-    )
-    .await?;
-
-    // Split into receiver and sender
-    let (mut receiver, mut sender) = Delivery::split(delivery);
-
-    sender
-        .broadcast(ControlMessage::CommitteeMemberAnnouncement)
-        .await
-        .map_err(Error::Network)?;
-
-    // Initialize committee set
-    let mut committee = HashSet::new();
-
-    // Set a timeout for discovery
-    let timeout = tokio::time::sleep(std::time::Duration::from_secs(2));
-    tokio::pin!(timeout);
-
-    // Process responses until timeout
-    loop {
-        tokio::select! {
-            _ = &mut timeout => {
-                break;
-            }
-            Some(msg_result) = receiver.next() => {
-
-                match msg_result {
-                    Ok(incoming) => {
-
-                        // Extract party ID from incoming message
-                        let pid = incoming.sender;
-
-                        // Match the message content
-                        match incoming.msg {
-                            ControlMessage::CommitteeMemberAnnouncement => {
-                                if pid != 0 { // Don't include discovery party
-                                    committee.insert(pid);
-                                }
-                            }
-                            ControlMessage::CommitteeState { members, .. } => {
-                                committee.extend(members.into_iter());
-                            }
-                            _ => {} // Ignore other message types
-                        }
-                    }
-                    Err(e) => {
-                        println!("Error receiving response: {:?}", e);
-                    }
-                }
-            }
-        }
-    }
-
-    println!("Found {} committee members", committee.len());
-    Ok(committee)
-}
-
-/// Structure representing a signing request
-#[derive(Debug)]
-pub struct SigningRequest {
-    pub message: String,
-    pub initiator: u16,
 }
 
 /// Execution ID coordination data

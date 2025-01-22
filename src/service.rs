@@ -203,7 +203,7 @@ impl Service {
     ) -> Result<(), Error> {         
         loop {
             let mut context = self.context.write().await;
-            
+
             match (&self.fsm.state(), context.last_event.take()) {
                 (service::State::Initial, _) => {
                     println!("Committee ready");
@@ -298,6 +298,7 @@ pub async fn run_service_mode(
     let mut service = Service::new(message);
     service.run(server_addr, party_id).await?;
 
+    tokio::time::sleep(Duration::from_secs(2)).await;
     println!("Signing request sent successfully");
     Ok(())
 }

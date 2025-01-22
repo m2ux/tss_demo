@@ -420,15 +420,13 @@ impl WsServer {
                 );
             }
             ServerMessage::Unregister { session } => {
-                //TODO: Add session validation check here
-
-                println!(
-                    "[S{}] Unregistered party {}",
-                    &session.session_id, session.party_id
-                );
-
                 let mut clients_lock = clients.write().await;
-                clients_lock.remove(&session);
+                if clients_lock.remove(&session).is_some() {
+                    println!(
+                        "[S{}] Unregistered party {}",
+                        &session.session_id, session.party_id
+                    );
+                }
             }
         }
     }
