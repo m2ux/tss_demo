@@ -276,6 +276,7 @@ dependencies = [
  "clap",
  "futures",
  "futures-util",
+ "hex",
  "pot",
  "rand_core",
  "rmp-serde",

@@ -17,7 +17,9 @@ use sha2::Sha256;
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use cggmp21::generic_ec::NonZero;
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -72,10 +74,15 @@ state_machine! {
     CollectingApprovals => {
         QuorumApproved => CollectingApprovals,
         QuorumDeclined => Idle,
-        SigningComplete => Signing,
+        ReadyToSign => Signing,
         EndSigning => TidyUp
     },
 
+    PreSigning => {
+        DeliveryReady => Signing,
+        EndSigning => TidyUp
+    },
+    
     Signing => {
         SigningComplete => Idle,
         EndSigning => TidyUp
@@ -92,6 +99,7 @@ pub struct SigningEnv {
     collection_deadline: Option<Instant>,
     last_event: Option<Input>,
     signing_timeout: Duration,
+    signing_parties: Vec<u16>,
 }
 
 impl SigningEnv {
@@ -105,6 +113,7 @@ impl SigningEnv {
             collection_deadline: None,
             last_event: None,
             signing_timeout: Duration::from_secs(10),
+            signing_parties: Vec::new(),
         }
     }
 
@@ -176,7 +185,8 @@ impl Signing {
     ) -> Result<(), Error> {
         // Get out party ID
         let party_id = sender.get_party_id();
-
+        let mut delivery_handle: Option<Result<WsDelivery<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>, Error>> = None;
+        
         loop {
             // Acquire a context lock
             let mut context = self.context.write().await;
@@ -202,6 +212,16 @@ impl Signing {
                         .broadcast(SigningProtocolMessage::SigningAvailable)
                         .await?;
 
+                    // Spawn delivery handler in a new task
+                    delivery_handle = Some(
+                        WsDelivery::<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>::connect(
+                            "ws://localhost:8080",
+                            party_id,
+                            CommitteeSession::Signing,
+                        )
+                            .await
+                            .map_err(Error::from));
+                    
                     context.event(Input::SignRequestReceived);
                 }
 
@@ -212,7 +232,6 @@ impl Signing {
                         context.event(Input::CollectionTimeout);
                     }
                 }
-
                 (
                     signing_protocol::State::ComparingCandidates,
                     Some(Input::CandidateSetReceived),
@@ -270,35 +289,51 @@ impl Signing {
                     println!("Transition: CollectingApprovals state (QuorumApproved)");
                     println!("- Approvals received: {}", context.quorum_approved.len());
                     println!(
-                        "- Further required approvals: {}",
+                        "- Required approvals: {}",
                         context.signing_candidates.len() - 1
                     );
 
                     // Check if we have approval from all candidates
                     if context.quorum_approved.len() == context.signing_candidates.len() - 1 {
+
                         // Select the lowest-ordered 3 members
                         let mut ordered_candidates: Vec<u16> =
                             context.signing_candidates.iter().cloned().collect();
                         ordered_candidates.sort();
 
-                        let signing_parties =
-                            &ordered_candidates[..min(3, ordered_candidates.len())];
+                        // Select the signing parties
+                        context.signing_parties =
+                            ordered_candidates[..min(3, ordered_candidates.len())].to_vec();
 
-                        println!("- Selected signing parties: {:?}", signing_parties);
+                        println!("- Selected signing parties: {:?}", context.signing_parties);
 
-                        // Perform signing
-                        if let Some(message) = &context.current_message.take() {
-                            println!(
-                                "- Starting signing process for message of length: {}",
-                                message.len()
-                            );
+                        
+                        // Raise a ready-to-sign event
+                        context.last_event = Some(Input::ReadyToSign);
+                    }
+                }
+                (signing_protocol::State::Signing, _) => {
+
+                    // Perform signing
+                    // If we are not a signatory then quite the process
+                    if !context.signing_parties.contains(&party_id) {
+                        println!("No further participation in the signing process");
+                        context.event(Input::SigningComplete);
+                    }else if let Some(message) = &context.current_message.take() {
+                        println!(
+                            "- Starting signing process for message of length: {}",
+                            message.len()
+                        );
+
+                        if let Some(Ok(delivery)) = delivery_handle.take() {
                             match handle_signing_request(
                                 message,
-                                signing_parties,
+                                &context.signing_parties,
                                 &self.storage,
                                 party_id,
+                                delivery,
                             )
-                            .await
+                                .await
                             {
                                 Ok(signature) => {
                                     println!("- Signing successful, broadcasting signature share");
@@ -311,11 +346,16 @@ impl Signing {
                                         })
                                         .await
                                         .map_err(Error::Network)?;
+
+                                    let r_bytes = &signature.r.to_be_bytes();
+                                    let s_bytes = &signature.s.to_be_bytes();
+
+                                    println!("Signature [r,s]: [{:#?},{:#?}]", hex::encode(r_bytes), hex::encode(s_bytes));
                                     context.event(Input::SigningComplete);
                                 }
                                 Err(e) => {
                                     println!("- Signing failed, {}", e);
-                                    context.event(Input::QuorumDeclined);
+                                    context.event(Input::SigningComplete);
                                 }
                             }
                         }
@@ -445,22 +485,17 @@ async fn handle_signing_request(
     signing_parties: &[u16],
     storage: &KeyStorage,
     party_id: u16,
+    delivery: WsDelivery<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>,
 ) -> Result<Signature<Secp256k1>, Error> {
     println!("Handling signing request from party ");
 
     // Load the stored data
     let execution_id = storage.load::<String>("execution_id")?;
     let key_share = storage.load_key_share("key_share")?;
+
     let execution_id = ExecutionId::new(execution_id.as_bytes());
     let data_to_sign = cggmp21::DataToSign::digest::<Sha256>(message);
-
-    let delivery = WsDelivery::<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>::connect(
-        "ws://localhost:8080",
-        party_id,
-        CommitteeSession::Signing,
-    )
-    .await?;
-
+    
     // Generate the signature
     println!("Generating signature..");
     let signature = cggmp21::signing(execution_id, party_id, signing_parties, &key_share)

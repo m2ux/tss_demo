@@ -203,14 +203,8 @@ impl Service {
     ) -> Result<(), Error> {         
         loop {
             let mut context = self.context.write().await;
-
-            // Detect an incoming events
-            let last_event = match context.last_event.take() {
-                Some(event) => event,
-                None => continue,
-            };
             
-            match (&self.fsm.state(), last_event) {
+            match (&self.fsm.state(), context.last_event.take()) {
                 (service::State::Initial, _) => {
                     println!("Committee ready");
                 }
