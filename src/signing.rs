@@ -176,10 +176,7 @@ impl Signing {
         )
         .await?;
         let (receiver, sender) = Delivery::split(delivery);
-
-        // Starting event
-        self.context.write().await.last_event = Some(Input::Starting);
-
+        
         // Spawn message receiving task
         let message_handler = handle_messages(Arc::clone(&self.context), receiver);
         let run_handler = self.run_machine(sender);
@@ -201,6 +198,9 @@ impl Signing {
         let party_id = sender.get_party_id();
         let mut delivery_handle: Option<Result<WsDelivery<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>, Error>> = None;
 
+        // Starting event
+        self.context.write().await.last_event = Some(Input::Starting);
+        
         loop {
             // Acquire a context lock
             let mut context = self.context.write().await;
@@ -453,7 +453,7 @@ async fn handle_messages(
         incoming: Incoming<SigningProtocolMessage>,
         context: &Arc<RwLock<SigningEnv>>,
     ) -> Result<(), Error> {
-
+        // Obtain a write lock
         let mut context = context.write().await;
 
         // Extract party ID from incoming message
