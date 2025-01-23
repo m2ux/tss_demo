@@ -187,13 +187,10 @@ pub struct SigningEnv {
     current_message: Option<Vec<u8>>,
 
     /// Deadline for collecting signing candidates
-    collection_deadline: Option<Instant>,
+    deadline: Option<Instant>,
 
     /// Most recent protocol event
     last_event: Option<Input>,
-
-    /// Maximum time to wait for candidate collection
-    signing_timeout: Duration,
 
     /// Parties selected for signing
     signing_parties: Vec<u16>,
@@ -212,9 +209,8 @@ impl SigningEnv {
             received_candidates: HashMap::new(),
             quorum_approved: HashSet::new(),
             current_message: None,
-            collection_deadline: None,
+            deadline: None,
             last_event: None,
-            signing_timeout: Duration::from_secs(10),
             signing_parties: Vec::new(),
         }
     }
@@ -229,7 +225,7 @@ impl SigningEnv {
         self.received_candidates.clear();
         self.quorum_approved.clear();
         self.current_message = None;
-        self.collection_deadline = None;
+        self.deadline = None;
         self.signing_parties.clear();
     }
 
@@ -241,21 +237,21 @@ impl SigningEnv {
         self.last_event = Some(event);
     }
 
-    /// Checks if the candidate collection deadline has passed.
+    /// Checks if the deadline has passed.
     ///
     /// # Returns
     /// `true` if the deadline has elapsed, `false` otherwise
     fn is_deadline_elapsed(&self) -> bool {
-        self.collection_deadline
+        self.deadline
             .map(|deadline| Instant::now() > deadline)
             .unwrap_or(false)
     }
 
-    /// Sets the deadline for collecting signing candidates.
+    /// Sets a deadline
     ///
-    /// The deadline is set to the current time plus the signing timeout duration.
-    fn set_deadline(&mut self) {
-        self.collection_deadline = Some(Instant::now() + self.signing_timeout);
+    /// The deadline is set to the current time plus the timeout duration.
+    fn set_deadline(&mut self, timeout: Duration) {
+        self.deadline = Some(Instant::now() + timeout);
     }
 }
 
@@ -483,7 +479,7 @@ impl Signing {
                     println!("Transition: Idle -> CollectingCandidates (SignRequestReceived)");
                     println!("- Clearing previous candidates and setting collection deadline");
                     context.signing_candidates.clear();
-                    context.set_deadline();
+                    context.set_deadline(Duration::from_secs(10));
 
                     // Add self to candidates and broadcast availability
                     context.signing_candidates.insert(party_id);

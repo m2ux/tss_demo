@@ -40,7 +40,9 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
+use tokio::time::Instant;
 
 /// Represents the various stages of committee initialization and operation
 ///
@@ -170,6 +172,8 @@ struct ProtocolEnv {
     pub signing_ready: HashSet<u16>,
     /// Execution ID coordination state
     pub execution_id_coord: ExecutionIdCoordination,
+    /// Deadline (general purpose)
+    pub deadline: Option<Instant>,
 }
 
 /// Protocol environment maintaining committee state and coordination data
@@ -182,6 +186,7 @@ impl ProtocolEnv {
             keygen_ready: HashSet::new(),
             signing_ready: HashSet::new(),
             execution_id_coord: ExecutionIdCoordination::new(),
+            deadline: None,
         }
     }
 
@@ -192,6 +197,24 @@ impl ProtocolEnv {
         self.keygen_ready.clear();
         self.signing_ready.clear();
         self.execution_id_coord = ExecutionIdCoordination::new();
+        self.deadline = None;
+    }
+
+    /// Checks if the deadline has passed.
+    ///
+    /// # Returns
+    /// `true` if the deadline has elapsed, `false` otherwise
+    fn is_deadline_elapsed(&self) -> bool {
+        self.deadline
+            .map(|deadline| Instant::now() > deadline)
+            .unwrap_or(false)
+    }
+
+    /// Sets a deadline
+    ///
+    /// The deadline is set to the current time plus the timeout duration.
+    fn set_deadline(&mut self, timeout: Duration) {
+        self.deadline = Some(Instant::now() + timeout);
     }
 }
 
@@ -288,18 +311,24 @@ impl Protocol {
 
             match committee_state {
                 CommitteeState::AwaitingMembers => {
-                    if context.committee_members.len() >= 5 {
+                    if context.deadline.is_none() {
+                        context.set_deadline(Duration::from_secs(5));
+                    }
+                    
+                    if context.committee_members.len() >= 3 && context.is_deadline_elapsed(){
                         println!("All committee members present. Establishing execution ID.");
                         committee_state = CommitteeState::EstablishingExecutionId;
+                        context.deadline = None;
                     } else {
                         sender
                             .broadcast(ControlMessage::CommitteeMemberAnnouncement)
                             .await
                             .map_err(Error::Network)?;
 
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 }
+                
                 CommitteeState::EstablishingExecutionId => {
                     // Lowest party ID proposes the execution ID
                     if party_id == *context.committee_members.iter().min().unwrap() {
