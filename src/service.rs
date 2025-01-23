@@ -45,12 +45,10 @@ state_machine! {
     /// State machine for the signing service.
     ///
     /// # States
-    /// - Initial: Starting state, waiting for committee readiness
     /// - SendingRequest: Committee is ready, sending signing request
     /// - Exit: Terminal state, service operation complete
     ///
     /// # Transitions
-    /// - CommitteeReady: Triggers transition from Initial to SendingRequest
     /// - RequestSent: Triggers transition from SendingRequest to Exit
     /// - Failed: Triggers transition to Exit from any state
     #[derive(Debug)]

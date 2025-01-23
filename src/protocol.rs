@@ -1,3 +1,27 @@
+//! Protocol implementation for distributed threshold signing operations.
+//!
+//! This module implements a distributed committee-based protocol for secure multiparty computation,
+//! specifically implementing the CGGMP21 threshold signature scheme. It handles committee formation,
+//! key generation, and signing-readiness coordination among multiple parties.
+//!
+//! # Protocol Flow
+//! 1. Committee Formation
+//!    - Parties announce themselves
+//!    - Committee forms when sufficient members join
+//!
+//! 2. Execution ID Establishment
+//!    - Lowest-ID party proposes execution ID
+//!    - Other parties accept or reject
+//!    - Protocol proceeds when all accept
+//!
+//! 3. Key Generation
+//!    - Parties generate auxiliary information
+//!    - Perform distributed key generation
+//!    - Create individual key shares
+//!
+//! 4. Operational State
+//!    - Committee becomes ready for signing operations
+//!    - Handles signing requests in Ready state
 use crate::error::Error;
 use crate::network::{WsDelivery, WsReceiver, WsSender};
 use crate::signing::Signing;
@@ -57,9 +81,14 @@ enum CommitteeState {
     Ready,
 }
 
-/// Defines the structure and types of control messages used for committee coordination
+/// Control messages used for committee coordination and state management
 ///
-/// These messages handle committee formation, state synchronization, and signing operations
+/// These messages handle:
+/// - Committee formation
+/// - State synchronization
+/// - Execution ID coordination
+/// - Key generation status
+/// - Signing readiness
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[repr(u8)]
 pub enum ControlMessage {
@@ -90,9 +119,10 @@ pub enum ControlMessage {
     ReadyToSign,
 }
 
-/// Defines the structure and types of control messages used for committee coordination
+/// Session types for different committee operations
 ///
-/// These messages handle committee formation, state synchronization, and signing operations
+/// Defines distinct session contexts for control messages,
+/// protocol messages, and signing operations
 #[derive(Serialize, Debug, Clone)]
 #[serde(into = "u16", from = "u16")]
 pub enum CommitteeSession {
@@ -108,21 +138,38 @@ impl From<CommitteeSession> for u16 {
     }
 }
 
+/// Main protocol coordinator managing committee lifecycle and operations
+///
+/// Handles:
+/// - Committee formation and management
+/// - Key generation coordination
+/// - State transitions
+/// - Signing operations
 pub struct Protocol {
+    /// Shared protocol environment containing committee state
     context: Arc<RwLock<ProtocolEnv>>,
+    /// Storage for cryptographic keys and protocol data
     storage: KeyStorage,
+    /// Signing protocol implementation
     signing: Signing,
 }
 
+/// Protocol environment maintaining committee state and coordination data
 #[derive(Debug)]
 struct ProtocolEnv {
+    /// Set of current committee member IDs
     pub committee_members: HashSet<u16>,
+    /// Set of parties that have completed auxiliary info generation
     pub aux_info_ready: HashSet<u16>,
+    /// Set of parties that have completed key generation
     pub keygen_ready: HashSet<u16>,
+    /// Set of parties ready for signing operations
     pub signing_ready: HashSet<u16>,
+    /// Execution ID coordination state
     pub execution_id_coord: ExecutionIdCoordination,
 }
 
+/// Protocol environment maintaining committee state and coordination data
 impl ProtocolEnv {
     /// Creates a new ProtocolEnv instance with empty state
     pub fn new() -> Self {
@@ -146,6 +193,13 @@ impl ProtocolEnv {
 }
 
 impl Protocol {
+    /// Creates a new Protocol instance for the specified party
+    ///
+    /// # Arguments
+    /// * `party_id` - Unique identifier for this protocol participant
+    ///
+    /// # Returns
+    /// * `Result<Protocol, Error>` - New protocol instance or error
     pub async fn new(party_id: u16) -> Result<Self, Error> {
         // Initialize storage
         let storage = KeyStorage::new(
@@ -163,6 +217,14 @@ impl Protocol {
         })
     }
 
+    /// Starts the protocol, connecting to the specified server
+    ///
+    /// # Arguments
+    /// * `server_addr` - Address of the coordination server
+    /// * `party_id` - Unique identifier for this protocol participant
+    ///
+    /// # Returns
+    /// * `Result<(), Error>` - Success or error status
     pub async fn start(&mut self, server_addr: String, party_id: u16) -> Result<(), Error> {
         println!("Starting in committee mode with party ID: {}", party_id);
 
@@ -191,8 +253,14 @@ impl Protocol {
         Ok(())
     }
 
-    /// Runs the committee initialization process, handling state transitions from member collection
-    /// through key generation and signing readiness.
+    /// Runs the committee initialization process and manages state transitions
+    ///
+    /// # Arguments
+    /// * `sender` - Channel for sending control messages
+    /// * `server_addr` - Address of the coordination server
+    ///
+    /// # Returns
+    /// * `Result<(), Error>` - Success or error status
     async fn run_handler(
         &mut self,
         mut sender: WsSender<ControlMessage>,
@@ -363,7 +431,15 @@ impl Protocol {
         }
     }
 }
-/// Network message handler
+
+/// Handles incoming network messages and updates protocol state
+///
+/// # Arguments
+/// * `context` - Shared protocol environment
+/// * `receiver` - Channel for receiving control messages
+///
+/// # Returns
+/// * `Result<(), Error>` - Success or error status
 async fn handle_messages(
     context: Arc<RwLock<ProtocolEnv>>,
     mut receiver: WsReceiver<ControlMessage>,
@@ -434,6 +510,15 @@ async fn handle_messages(
 }
 
 /// Generates auxiliary information as per CGGMP21 specification
+///
+/// # Arguments
+/// * `party_id` - Unique identifier for this protocol participant
+/// * `n_parties` - Total number of participating parties
+/// * `server_addr` - Address of the coordination server
+/// * `eid` - Unique execution identifier
+///
+/// # Returns
+/// * `Result<AuxInfo, Error>` - Generated auxiliary information or error
 async fn generate_auxiliary_info(
     party_id: u16,
     n_parties: u16,
@@ -461,6 +546,15 @@ async fn generate_auxiliary_info(
 }
 
 /// Generates key share through distributed key generation protocol
+///
+/// # Arguments
+/// * `party_id` - Unique identifier for this protocol participant
+/// * `committee` - Set of participating committee members
+/// * `server_addr` - Address of the coordination server
+/// * `eid` - Unique execution identifier
+///
+/// # Returns
+/// * `Result<CoreKeyShare<Secp256k1>, Error>` - Generated key share or error
 async fn generate_key_share(
     party_id: u16,
     committee: &HashSet<u16>,
@@ -488,7 +582,7 @@ async fn generate_key_share(
     Ok(keygen)
 }
 
-/// Execution ID coordination data
+/// Coordinates execution ID proposal and acceptance among committee members
 #[derive(Debug)]
 struct ExecutionIdCoordination {
     /// The proposed execution ID
@@ -500,6 +594,7 @@ struct ExecutionIdCoordination {
 }
 
 impl ExecutionIdCoordination {
+    /// Creates a new ExecutionIdCoordination instance
     fn new() -> Self {
         Self {
             proposed_id: None,
@@ -508,22 +603,26 @@ impl ExecutionIdCoordination {
         }
     }
 
+    /// Records a proposed execution ID from a party
     fn consider(&mut self, party_id: u16, execution_id: String) {
         self.proposed_id = Some(execution_id);
         self.proposer = Some(party_id);
         self.accepting_parties.clear();
     }
 
+    /// Records party approval of the current proposal
     fn approve(&mut self, party_id: u16) {
         self.accepting_parties.insert(party_id); // Proposer automatically accepts
     }
 
+    /// Rejects the proposed execution ID
     fn reject(&mut self) {
         self.proposed_id = None;
         self.proposer = None;
         self.accepting_parties.clear();
     }
 
+    /// Proposes a new execution ID
     fn propose(&mut self, party_id: u16, execution_id: String) {
         self.proposed_id = Some(execution_id);
         self.proposer = Some(party_id);
@@ -531,6 +630,7 @@ impl ExecutionIdCoordination {
         self.accepting_parties.insert(party_id); // Proposer automatically accepts
     }
 
+    /// Records acceptance of the proposed ID by a party
     fn accept(&mut self, party_id: u16, execution_id: &str) -> bool {
         if let Some(ref proposed) = self.proposed_id {
             if proposed == execution_id {
@@ -541,10 +641,12 @@ impl ExecutionIdCoordination {
         false
     }
 
+    /// Checks if all parties have agreed on the execution ID
     fn is_agreed(&self, total_parties: usize) -> bool {
         self.accepting_parties.len() == total_parties
     }
 
+    /// Retrieves the agreed execution ID if consensus is reached
     fn get_agreed_id(&self) -> Option<String> {
         if self.proposed_id.is_some() && !self.accepting_parties.is_empty() {
             self.proposed_id.clone()
@@ -554,7 +656,7 @@ impl ExecutionIdCoordination {
     }
 }
 
-/// Generate a unique execution ID
+/// Generates a unique execution ID combining timestamp and UUID
 fn generate_unique_execution_id() -> String {
     // Combine timestamp and UUID for uniqueness
     format!(
