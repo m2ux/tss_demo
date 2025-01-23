@@ -348,10 +348,7 @@ mod tests {
     #[test]
     /// Test saving to invalid directory fails
     fn test_save_invalid_directory() {
-        let storage = KeyStorage::new("/nonexistent/directory", "test-password").unwrap();
-        let test_data = "test data";
-
-        let result = storage.save("test-key", &test_data);
+        let result = KeyStorage::new("/nonexistent/directory", "test-password");
         assert!(matches!(result, Err(StorageError::Io(_))));
     }
 
