@@ -303,7 +303,7 @@ impl Signing {
                     }
                 }
                 (signing_protocol::State::CollectingApprovals, Some(Input::QuorumApproved)) => {
-                    tokio::time::sleep(Duration::from_millis((10 * party_id) as u64)).await;
+                    tokio::time::sleep(Duration::from_millis((50 * party_id) as u64)).await;
                     println!("Transition: CollectingApprovals state (QuorumApproved)");
                     println!("- Approvals received: {}", context.quorum_approved.len());
                     println!(
@@ -369,7 +369,7 @@ impl Signing {
                                     let r_bytes = &signature.r.to_be_bytes();
                                     let s_bytes = &signature.s.to_be_bytes();
 
-                                    println!("- Signature [r,s]: [{:#?},{:#?}]", hex::encode(r_bytes), hex::encode(s_bytes));
+                                    println!("{color_blue}- Signature [r,s]: [{:#?},{:#?}]{color_reset}", hex::encode(r_bytes), hex::encode(s_bytes));
                                     context.event(Input::SigningComplete);
                                 }
                                 Err(e) => {
@@ -377,7 +377,7 @@ impl Signing {
                                     context.event(Input::SigningComplete);
                                 }
                             }
-                            tokio::time::sleep(Duration::from_millis((10 * party_id) as u64)).await;
+                            tokio::time::sleep(Duration::from_millis((50 * party_id) as u64)).await;
                         }
                     }
                 }
@@ -469,17 +469,17 @@ async fn handle_messages(
                 if !context.is_deadline_elapsed() {
                     context.signing_candidates.insert(pid);
                     println!(
-                        "{color_blue}¬ Adding party {}. Available candidates: {:?}{color_reset}",
+                        "¬ Adding party {}. Available candidates: {:?}",
                         pid, context.signing_candidates
                     );
                     Input::CandidateAvailable
                 } else {
-                    println!("{color_blue}¬ Not adding party {} to available candidates (timeout){color_reset}", pid);
+                    println!("¬ Not adding party {} to available candidates (timeout)", pid);
                     Input::CollectionTimeout
                 }
             }
             SigningProtocolMessage::CandidateSet { candidates } => {
-                println!("{color_blue}¬ Adding candidate set from party {}{color_reset}", pid);
+                println!("¬ Adding candidate set from party {}", pid);
 
                 context.received_candidates.insert(pid, candidates);
                 Input::CandidateSetReceived
@@ -489,20 +489,20 @@ async fn handle_messages(
                 Input::QuorumApproved
             }
             SigningProtocolMessage::QuorumDeclined => {
-                println!("{color_blue}¬ Quorum declined by party {}{color_reset}", pid);
+                println!("¬ Quorum declined by party {}", pid);
                 Input::QuorumDeclined
             }
             SigningProtocolMessage::EndSigning => {
-                println!("{color_blue}¬ Signing-ended by party {}{color_reset}", pid);
+                println!("¬ Signing-ended by party {}", pid);
                 Input::EndSigning
             }
             SigningProtocolMessage::SignatureShare { sig_share } => {
-                println!("{color_blue}¬ Received signature share from party {}{color_reset}", pid);
+                println!("¬ Received signature share from party {}", pid);
                 context.received_signatures.insert(pid, sig_share);
                 Input::EndSigning
             }
             SigningProtocolMessage::VerificationResult { success } => {
-                println!("{color_blue}¬ Received verification result from party {}: {}{color_reset}", pid, success);
+                println!("¬ Received verification result from party {}: {}", pid, success);
                 Input::VerificationComplete
             }
         };
