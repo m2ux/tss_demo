@@ -314,7 +314,7 @@ impl Protocol {
                     if context.deadline.is_none() {
                         context.set_deadline(Duration::from_secs(5));
                     }
-                    
+
                     if context.committee_members.len() >= 3 && context.is_deadline_elapsed(){
                         println!("All committee members present. Establishing execution ID.");
                         committee_state = CommitteeState::EstablishingExecutionId;
@@ -328,7 +328,7 @@ impl Protocol {
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 }
-                
+
                 CommitteeState::EstablishingExecutionId => {
                     // Lowest party ID proposes the execution ID
                     if party_id == *context.committee_members.iter().min().unwrap() {
@@ -394,6 +394,7 @@ impl Protocol {
                     .await?;
                     self.storage.save("aux_info", &aux_info)?;
 
+                    tokio::time::sleep(Duration::from_millis((50 * party_id) as u64)).await;
                     sender
                         .broadcast(ControlMessage::AuxInfoReady)
                         .await
@@ -403,7 +404,7 @@ impl Protocol {
                     committee_state = CommitteeState::AwaitingAuxInfo;
                 }
                 CommitteeState::AwaitingAuxInfo => {
-                    if context.aux_info_ready.len() >= 5 {
+                    if context.aux_info_ready.len() == context.committee_members.len() {
                         println!("All auxiliary info generated. Starting key generation.");
                         committee_state = CommitteeState::GeneratingKeys;
                     }
@@ -438,7 +439,7 @@ impl Protocol {
                     committee_state = CommitteeState::AwaitingKeyGen;
                 }
                 CommitteeState::AwaitingKeyGen => {
-                    if context.keygen_ready.len() >= 5 {
+                    if context.keygen_ready.len() == context.committee_members.len() {
                         println!("Key generation complete");
 
                         sender
@@ -451,7 +452,7 @@ impl Protocol {
                     }
                 }
                 CommitteeState::WaitForReady => {
-                    if context.signing_ready.len() >= 5 {
+                    if context.signing_ready.len() == context.committee_members.len() {
                         committee_state = CommitteeState::Ready;
                     }
                 }

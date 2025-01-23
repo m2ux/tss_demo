@@ -479,7 +479,7 @@ impl Signing {
                     println!("Transition: Idle -> CollectingCandidates (SignRequestReceived)");
                     println!("- Clearing previous candidates and setting collection deadline");
                     context.signing_candidates.clear();
-                    context.set_deadline(Duration::from_secs(10));
+                    context.set_deadline(Duration::from_secs(5));
 
                     // Add self to candidates and broadcast availability
                     context.signing_candidates.insert(party_id);
