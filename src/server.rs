@@ -304,13 +304,7 @@ impl WsServer {
                                 break session;
                             }
                             Ok(ServerMessage::Unregister { session }) => {
-                                let mut clients_lock = clients.write().await;
-                                if clients_lock.remove(&session).is_some() {
-                                    println!(
-                                        "[S{}] Unregistered party {}",
-                                        &session.session_id, session.party_id
-                                    );
-                                }
+                                let _ = Self::unregister_client(&session, &clients).await;
                                 return Ok(());
                             }
                             Err(e) => {
@@ -386,10 +380,11 @@ impl WsServer {
             async move {
                 while let Some(msg) = rx.next().await {
                     if let Err(e) = ws_sender.send(msg).await {
-                        println!(
+                        /*println!(
                             "Failed to send message to party {}, session {}: {}",
                             &party_session.party_id, &party_session.session_id, e
-                        );
+                        );*/
+                        let _ = Self::unregister_client(&party_session, &clients).await;
                         break;
                     }
                 }
@@ -420,13 +415,7 @@ impl WsServer {
                 );
             }
             ServerMessage::Unregister { session } => {
-                let mut clients_lock = clients.write().await;
-                if clients_lock.remove(&session).is_some() {
-                    println!(
-                        "[S{}] Unregistered party {}",
-                        &session.session_id, session.party_id
-                    );
-                }
+                let _ = Self::unregister_client(&session, clients).await;
             }
         }
     }
@@ -480,5 +469,30 @@ impl WsServer {
                 }
             }
         }
+    }
+
+    /// Unregisters a client session from the server.
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - The party session to unregister
+    /// * `clients` - The shared client registry
+    ///
+    /// # Returns
+    ///
+    /// Returns Ok(()) if unregistration was successful, regardless of whether
+    /// the client was actually registered.
+    async fn unregister_client(
+        session: &PartySession,
+        clients: &Arc<RwLock<HashMap<PartySession, ClientSession>>>,
+    ) -> Result<(), ServerError> {
+        let mut clients_lock = clients.write().await;
+        if clients_lock.remove(session).is_some() {
+            println!(
+                "[S{}] Unregistered party {}",
+                &session.session_id, session.party_id
+            );
+        }
+        Ok(())
     }
 }

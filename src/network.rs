@@ -342,26 +342,54 @@ where
 
         // Handle incoming WebSocket messages
         let (ws_rcvr_tx, ws_rcvr_rx) = unbounded();
+        let (ws_sender_tx, mut ws_sender_rx) = unbounded();
+
         tokio::spawn(async move {
             let mut read = read;
-            while let Some(msg) = read.next().await {
-                if let Ok(Message::Binary(data)) = msg {
-                    let _ = ws_rcvr_tx.unbounded_send(data);
-                } else {
-                    println!("Unexpected message: {:?}", msg);
+            loop {
+                tokio::select! {
+                    // Handle incoming messages
+                    msg = read.next() => {
+                        match msg {
+                            Some(Ok(Message::Binary(data))) => {
+                                if ws_rcvr_tx.unbounded_send(data).is_err() {
+                                    //println!("Receiver channel closed, terminating");
+                                    break;
+                                }
+                            }
+                            Some(Ok(_)) => {
+                                continue;
+                            }
+                            Some(Err(e)) => {
+                                //println!("WebSocket read error: {}", e);
+                                break;
+                            }
+                            None => {
+                                println!("WebSocket connection closed by peer");
+                                break;
+                            }
+                        }
+                    }
+                    // Handle outgoing messages
+                    msg = ws_sender_rx.next() => {
+                        match msg {
+                            Some(data) => {
+                                if let Err(e) = write.send(Message::Binary(data)).await {
+                                    println!("WebSocket write error: {}", e);
+                                    break;
+                                }
+                            }
+                            None => {
+                                //println!("Sender channel closed, terminating");
+                                break;
+                            }
+                        }
+                    }
                 }
             }
-        });
 
-        // Handle outgoing WebSocket messages
-        let (ws_sender_tx, mut ws_sender_rx) = unbounded();
-        tokio::spawn(async move {
-            while let Some(data) = ws_sender_rx.next().await {
-                if let Err(e) = write.send(Message::Binary(data)).await {
-                    println!("Error sending WebSocket message: {}", e);
-                    break;
-                }
-            }
+            // Attempt to close the connection gracefully
+            let _ = write.close().await;
         });
 
         let sender = WsSender {

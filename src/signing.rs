@@ -21,6 +21,7 @@ use cggmp21::generic_ec::NonZero;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
+use inline_colorization::*;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum SigningProtocolMessage {
@@ -81,7 +82,7 @@ state_machine! {
         ReadyToSign => Signing,
         EndSigning => TidyUp
     },
-    
+
     Signing => {
         SigningComplete => VerifyingSignatures,
         SigningSkipped => Idle,
@@ -178,12 +179,16 @@ impl Signing {
 
         // Starting event
         self.context.write().await.last_event = Some(Input::Starting);
-        
+
         // Spawn message receiving task
         let message_handler = handle_messages(Arc::clone(&self.context), receiver);
         let run_handler = self.run_machine(sender);
-        
-        tokio::try_join!(message_handler, run_handler)?;
+
+        // End on termination of either handler
+        tokio::select! {
+            result = message_handler => result?,
+            result = run_handler => result?,
+        }
         Ok(())
     }
 
@@ -195,7 +200,7 @@ impl Signing {
         // Get out party ID
         let party_id = sender.get_party_id();
         let mut delivery_handle: Option<Result<WsDelivery<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>, Error>> = None;
-        
+
         loop {
             // Acquire a context lock
             let mut context = self.context.write().await;
@@ -211,7 +216,7 @@ impl Signing {
                 (signing_protocol::State::Idle, Some(Input::Starting)) => {
                     println!("Committee ready for signing operations.");
                 }
-                
+
                 (signing_protocol::State::Idle, Some(Input::SignRequestReceived)) => {
                     println!("Transition: Idle -> CollectingCandidates (SignRequestReceived)");
                     println!("- Clearing previous candidates and setting collection deadline");
@@ -234,7 +239,7 @@ impl Signing {
                         )
                             .await
                             .map_err(Error::from));
-                    
+
                     context.event(Input::SignRequestReceived);
                 }
 
@@ -320,7 +325,7 @@ impl Signing {
 
                         println!("- Selected signing parties: {:?}", context.signing_parties);
 
-                        
+
                         // Raise a ready-to-sign event
                         context.last_event = Some(Input::ReadyToSign);
                     }
@@ -382,7 +387,7 @@ impl Signing {
                     if context.received_signatures.len() == context.signing_parties.len() {
 
                         //println!("- Received signatures: {:?}", &context.received_signatures);
-                        
+
                         // Get the first signature as reference
                         if let Some((_, first_sig)) = context.received_signatures.iter().next() {
                             // Compare all signatures with the first one
@@ -449,16 +454,10 @@ async fn handle_messages(
         context: &Arc<RwLock<SigningEnv>>,
     ) -> Result<(), Error> {
 
-        use colored::Colorize;
         let mut context = context.write().await;
 
         // Extract party ID from incoming message
         let pid = incoming.sender;
-
-        fn to_blue(s: String) {
-            use colored::Colorize;
-            println!("{}", s.blue());
-        }
         
         // Match the message content
         let input = match incoming.msg {
@@ -469,19 +468,19 @@ async fn handle_messages(
             SigningProtocolMessage::SigningAvailable => {
                 if !context.is_deadline_elapsed() {
                     context.signing_candidates.insert(pid);
-                    to_blue(format!(
-                        "¬ Adding party {}. Available candidates: {:?} ",
+                    println!(
+                        "{color_blue}¬ Adding party {}. Available candidates: {:?}{color_reset}",
                         pid, context.signing_candidates
-                    ));
+                    );
                     Input::CandidateAvailable
                 } else {
-                    to_blue(format!("¬ Not adding party {} to available candidates (timeout)", pid));
+                    println!("{color_blue}¬ Not adding party {} to available candidates (timeout){color_reset}", pid);
                     Input::CollectionTimeout
                 }
             }
             SigningProtocolMessage::CandidateSet { candidates } => {
-                to_blue(format!("¬ Adding candidate set from party {}", pid));
-                
+                println!("{color_blue}¬ Adding candidate set from party {}{color_reset}", pid);
+
                 context.received_candidates.insert(pid, candidates);
                 Input::CandidateSetReceived
             }
@@ -490,23 +489,20 @@ async fn handle_messages(
                 Input::QuorumApproved
             }
             SigningProtocolMessage::QuorumDeclined => {
-                to_blue(format!("¬ Quorum declined by party {}", pid));
+                println!("{color_blue}¬ Quorum declined by party {}{color_reset}", pid);
                 Input::QuorumDeclined
             }
             SigningProtocolMessage::EndSigning => {
-                to_blue(format!("¬ Signing-ended by party {}", pid));
+                println!("{color_blue}¬ Signing-ended by party {}{color_reset}", pid);
                 Input::EndSigning
             }
             SigningProtocolMessage::SignatureShare { sig_share } => {
-                to_blue(format!("¬ Received signature share from party {}", pid));
+                println!("{color_blue}¬ Received signature share from party {}{color_reset}", pid);
                 context.received_signatures.insert(pid, sig_share);
                 Input::EndSigning
             }
             SigningProtocolMessage::VerificationResult { success } => {
-                to_blue(format!(
-                    "¬ Received verification result from party {}: {}",
-                    pid, success
-                ));
+                println!("{color_blue}¬ Received verification result from party {}: {}{color_reset}", pid, success);
                 Input::VerificationComplete
             }
         };
@@ -554,7 +550,7 @@ async fn handle_signing_request(
 
     let execution_id = ExecutionId::new(execution_id.as_bytes());
     let data_to_sign = cggmp21::DataToSign::digest::<Sha256>(message);
-    
+
     // Generate the signature
     println!("- Generating signature..");
     let signature = cggmp21::signing(execution_id, party_id, signing_parties, &key_share)
