@@ -1,5 +1,5 @@
 
-# CGGMP21 Threshold Signature Implementation
+# CGGMP21 ECDSA Threshold Signature Demo
 
 A Rust demo implementation of the CGGMP21 threshold signature scheme for secure distributed signing operations.
 
