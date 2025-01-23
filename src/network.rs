@@ -31,7 +31,7 @@
 
 use crate::server::{PartySession, ServerMessage};
 use futures::channel::{mpsc, mpsc::unbounded};
-use futures::{stream::SplitStream, Sink, SinkExt, Stream, StreamExt};
+use futures::{Sink, SinkExt, Stream, StreamExt};
 use round_based::{Delivery, Incoming, MessageDestination, Outgoing};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -40,8 +40,7 @@ use std::{
     pin::Pin,
     sync::atomic::{AtomicU64, Ordering},
 };
-use tokio::net::TcpStream;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::connect_async;
 use tungstenite::Message;
 
 /// Thread-safe message ID generator with overflow handling.
@@ -360,7 +359,7 @@ where
                             Some(Ok(_)) => {
                                 continue;
                             }
-                            Some(Err(e)) => {
+                            Some(Err(_)) => {
                                 //println!("WebSocket read error: {}", e);
                                 break;
                             }
@@ -598,7 +597,7 @@ where
     ) -> std::task::Poll<Option<Self::Item>> {
         // Poll the underlying receiver
         let poll_result = Pin::new(&mut self.receiver).poll_next(cx);
-        let message_state = &mut self.message_state;
+        let _message_state = &mut self.message_state;
 
         match poll_result {
             std::task::Poll::Ready(Some(data)) => {

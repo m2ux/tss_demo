@@ -273,7 +273,7 @@ impl WsServer {
         stream: TcpStream,
         addr: SocketAddr,
         clients: Arc<RwLock<HashMap<PartySession, ClientSession>>>,
-        message_state: Arc<RwLock<MessageState>>,
+        _message_state: Arc<RwLock<MessageState>>,
     ) -> Result<(), ServerError> {
         let ws_stream = accept_async(stream).await?;
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
@@ -379,7 +379,7 @@ impl WsServer {
             let party_session = party_session.clone();
             async move {
                 while let Some(msg) = rx.next().await {
-                    if let Err(e) = ws_sender.send(msg).await {
+                    if (ws_sender.send(msg).await).is_err() {
                         /*println!(
                             "Failed to send message to party {}, session {}: {}",
                             &party_session.party_id, &party_session.session_id, e
@@ -407,8 +407,6 @@ impl WsServer {
         //println!("Handling server message from party {}", sender_id);
         match msg {
             ServerMessage::Register { session } => {
-                //TODO: Add session validation check here
-
                 println!(
                     "[S{}] Party {} already registered!",
                     &session.session_id, &session.party_id

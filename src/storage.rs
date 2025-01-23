@@ -39,10 +39,8 @@ use aes_gcm::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use cggmp21::key_share::DirtyKeyShare;
 use cggmp21::KeyShare;
 use cggmp21::supported_curves::Secp256k1;
-use cggmp21_keygen::key_share::{CoreKeyShare, Valid};
 
 /// Errors that can occur during storage operations.
 ///
@@ -248,7 +246,6 @@ impl KeyStorage {
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
-    use std::fs;
     use tempfile::TempDir;
 
     /// Helper function to create a temporary directory for testing

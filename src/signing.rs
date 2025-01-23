@@ -3,9 +3,7 @@ use crate::network;
 use crate::network::{WsDelivery, WsReceiver, WsSender};
 use crate::protocol::CommitteeSession;
 use crate::signing::signing_protocol::Input;
-use crate::storage::{KeyStorage, StorageError};
-use cggmp21::key_share::{AuxInfo, DirtyKeyShare};
-use cggmp21_keygen::key_share::{CoreKeyShare, Valid};
+use crate::storage::KeyStorage;
 use cggmp21::supported_curves::Secp256k1;
 use cggmp21::{ExecutionId, Signature};
 use futures_util::StreamExt;
@@ -17,9 +15,7 @@ use sha2::Sha256;
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use cggmp21::generic_ec::NonZero;
 use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 use inline_colorization::*;
 
@@ -176,7 +172,7 @@ impl Signing {
         )
         .await?;
         let (receiver, sender) = Delivery::split(delivery);
-        
+
         // Spawn message receiving task
         let message_handler = handle_messages(Arc::clone(&self.context), receiver);
         let run_handler = self.run_machine(sender);
@@ -200,7 +196,7 @@ impl Signing {
 
         // Starting event
         self.context.write().await.last_event = Some(Input::Starting);
-        
+
         loop {
             // Acquire a context lock
             let mut context = self.context.write().await;
@@ -254,7 +250,8 @@ impl Signing {
                     signing_protocol::State::ComparingCandidates,
                     Some(Input::CandidateSetReceived),
                 ) => {
-                    tokio::time::sleep(Duration::from_millis((10 * party_id) as u64)).await;
+                    // Delay to stagger comms to account for the fact that IPC queues are unbounded
+                    tokio::time::sleep(Duration::from_millis((50 * party_id) as u64)).await;
                     println!("Transition: ComparingCandidates state (CandidateSetReceived)");
                     println!(
                         "- Received candidates count: {}",
@@ -458,7 +455,7 @@ async fn handle_messages(
 
         // Extract party ID from incoming message
         let pid = incoming.sender;
-        
+
         // Match the message content
         let input = match incoming.msg {
             SigningProtocolMessage::SignRequest { message } => {

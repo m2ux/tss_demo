@@ -1,19 +1,17 @@
 use crate::error::Error;
 use crate::network::{WsDelivery, WsReceiver, WsSender};
-use crate::signing::{Signing, SigningEnv, SigningProtocolMessage};
+use crate::signing::Signing;
 use crate::storage::KeyStorage;
 use cggmp21::key_share::AuxInfo;
-use cggmp21::{key_refresh::AuxOnlyMsg, keygen::ThresholdMsg, security_level::SecurityLevel128, supported_curves::Secp256k1, ExecutionId, KeyShare, PregeneratedPrimes};
+use cggmp21::{key_refresh::AuxOnlyMsg, keygen::ThresholdMsg, security_level::SecurityLevel128, supported_curves::Secp256k1, ExecutionId, PregeneratedPrimes};
 use cggmp21_keygen::key_share::CoreKeyShare;
 use futures::StreamExt;
 use rand_core::OsRng;
 use round_based::{Delivery, Incoming, MpcParty};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
-use rust_fsm::StateMachine;
 use tokio::sync::RwLock;
 use crate::network;
 
@@ -88,19 +86,8 @@ pub enum ControlMessage {
     /// Announcement that a party has completed key generation
     KeyGenReady,
 
-    /// Request to initiate a signing operation
-    /// - message: The message to be signed
-    SigningRequest { message: String },
-
     /// Indicate that the protocol is ready to sign
     ReadyToSign,
-}
-
-/// Structure representing a signing request
-#[derive(Debug)]
-pub struct SigningRequest {
-    pub message: String,
-    pub initiator: u16,
 }
 
 /// Defines the structure and types of control messages used for committee coordination
@@ -216,7 +203,7 @@ impl Protocol {
 
         let mut committee_state = CommitteeState::AwaitingMembers;
         println!("Broadcasting presence as committee member {}", party_id);
-        
+
         // Insert the part ID
         self.context.write().await.committee_members.insert(party_id);
 
@@ -236,7 +223,7 @@ impl Protocol {
                             .await
                             .map_err(Error::Network)?;
 
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     }
                 }
                 CommitteeState::EstablishingExecutionId => {
@@ -444,8 +431,6 @@ async fn handle_messages(
             }
         }
     }
-
-    Ok(())
 }
 
 /// Generates auxiliary information as per CGGMP21 specification
@@ -533,7 +518,7 @@ impl ExecutionIdCoordination {
         self.accepting_parties.insert(party_id); // Proposer automatically accepts
     }
 
-    fn reject(&mut self, party_id: u16, execution_id: String) {
+    fn reject(&mut self) {
         self.proposed_id = None;
         self.proposer = None;
         self.accepting_parties.clear();

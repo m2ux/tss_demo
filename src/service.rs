@@ -55,12 +55,7 @@ state_machine! {
     /// - Failed: Triggers transition to Exit from any state
     #[derive(Debug)]
     service(SendingRequest)
-
-    Initial => {
-        CommitteeReady => SendingRequest,
-        Failed => Exit
-    },
-
+    
     SendingRequest => {
         RequestSent => Exit,
         Failed => Exit
@@ -175,11 +170,6 @@ impl Service {
         let monitor_handle = tokio::spawn(async move {
             monitor_ready_sign_messages(context_clone, control_receiver).await
         });
-
-        // Raise an immediate committee-ready event
-        let mut context = self.context.write().await;
-        context.event(Input::CommitteeReady);
-        drop(context);
         
         // Run the main service loop
         let result = self.run_machine(signing_sender).await;
@@ -205,9 +195,6 @@ impl Service {
             let mut context = self.context.write().await;
 
             match (&self.fsm.state(), context.last_event.take()) {
-                (service::State::Initial, _) => {
-                    println!("Committee ready");
-                }
                 (service::State::SendingRequest, _) => {
                     println!("Sending signature request");
                     // Create and send the sign request
@@ -229,7 +216,7 @@ impl Service {
 
             // Perform state transition and perform output actions
             if let Some(last_event) = context.last_event.take() {
-                if let Ok(Some(output_event)) = self.fsm.consume(&last_event) {
+                if let Ok(_output_event) = self.fsm.consume(&last_event) {
                     // Post-transition actions
                 }
             }
