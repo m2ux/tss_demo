@@ -315,10 +315,17 @@ impl Protocol {
                         context.set_deadline(Duration::from_secs(5));
                     }
 
-                    if context.committee_members.len() >= 3 && context.is_deadline_elapsed(){
-                        println!("All committee members present. Establishing execution ID.");
-                        committee_state = CommitteeState::EstablishingExecutionId;
-                        context.deadline = None;
+                    if context.is_deadline_elapsed() {
+                        if context.committee_members.len() >= 3 {
+                            println!("All committee members present. Establishing execution ID.");
+                            committee_state = CommitteeState::EstablishingExecutionId;
+                            context.deadline = None;
+                        } else {
+                            return Err(Error::Protocol(format!(
+                                "Insufficient parties ({}) available to form a committee!",
+                                context.committee_members.len()
+                            )));
+                        }
                     } else {
                         sender
                             .broadcast(ControlMessage::CommitteeMemberAnnouncement)

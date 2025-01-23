@@ -330,17 +330,9 @@ impl WsServer {
             async move {
                 while let Some(Ok(msg)) = ws_receiver.next().await {
                     if let Message::Binary(data) = msg {
-                        //println!("Received binary message from party {}", party_id);
 
                         // Try to deserialize as WireMessage (Protocol Message)
                         if let Ok(wire_msg) = bincode::deserialize::<WireMessage>(&data) {
-                            // Increment the message ID if ok or error and break if the monotonic increment validation fails
-                            /*    let mut message_state_lock = message_state.write().await;
-                            if let Err(e) = message_state_lock.validate_and_update_id(wire_msg.id) {
-                                println!("{}", e);
-                                break;
-                            }*/
-
                             Self::handle_client_message(
                                 &party_session,
                                 wire_msg,
