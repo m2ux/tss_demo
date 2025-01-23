@@ -31,7 +31,7 @@
 
 use crate::server::{PartySession, ServerMessage};
 use futures::channel::{mpsc, mpsc::unbounded};
-use futures::{stream::SplitStream, Sink, SinkExt, Stream, StreamExt};
+use futures::{Sink, SinkExt, Stream, StreamExt};
 use round_based::{Delivery, Incoming, MessageDestination, Outgoing};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -40,8 +40,8 @@ use std::{
     pin::Pin,
     sync::atomic::{AtomicU64, Ordering},
 };
-use tokio::net::TcpStream;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use std::time::Duration;
+use tokio_tungstenite::connect_async;
 use tungstenite::Message;
 
 /// Thread-safe message ID generator with overflow handling.
@@ -236,6 +236,10 @@ where
 
         Ok(())
     }
+
+    pub fn get_party_id(&self) -> u16 {
+        self.party_id
+    }
 }
 
 impl<M> Drop for WsSender<M>
@@ -252,6 +256,7 @@ where
 
         if let Ok(encoded) = bincode::serialize(&unreg_msg) {
             let _ = self.sender.unbounded_send(encoded);
+            std::thread::sleep(Duration::from_secs(1));
         }
     }
 }
@@ -338,26 +343,54 @@ where
 
         // Handle incoming WebSocket messages
         let (ws_rcvr_tx, ws_rcvr_rx) = unbounded();
+        let (ws_sender_tx, mut ws_sender_rx) = unbounded();
+
         tokio::spawn(async move {
             let mut read = read;
-            while let Some(msg) = read.next().await {
-                if let Ok(Message::Binary(data)) = msg {
-                    let _ = ws_rcvr_tx.unbounded_send(data);
-                } else {
-                    println!("Unexpected message: {:?}", msg);
+            loop {
+                tokio::select! {
+                    // Handle incoming messages
+                    msg = read.next() => {
+                        match msg {
+                            Some(Ok(Message::Binary(data))) => {
+                                if ws_rcvr_tx.unbounded_send(data).is_err() {
+                                    //println!("Receiver channel closed, terminating");
+                                    break;
+                                }
+                            }
+                            Some(Ok(_)) => {
+                                continue;
+                            }
+                            Some(Err(_)) => {
+                                //println!("WebSocket read error: {}", e);
+                                break;
+                            }
+                            None => {
+                                println!("WebSocket connection closed by peer");
+                                break;
+                            }
+                        }
+                    }
+                    // Handle outgoing messages
+                    msg = ws_sender_rx.next() => {
+                        match msg {
+                            Some(data) => {
+                                if let Err(e) = write.send(Message::Binary(data)).await {
+                                    println!("WebSocket write error: {}", e);
+                                    break;
+                                }
+                            }
+                            None => {
+                                //println!("Sender channel closed, terminating");
+                                break;
+                            }
+                        }
+                    }
                 }
             }
-        });
 
-        // Handle outgoing WebSocket messages
-        let (ws_sender_tx, mut ws_sender_rx) = unbounded();
-        tokio::spawn(async move {
-            while let Some(data) = ws_sender_rx.next().await {
-                if let Err(e) = write.send(Message::Binary(data)).await {
-                    println!("Error sending WebSocket message: {}", e);
-                    break;
-                }
-            }
+            // Attempt to close the connection gracefully
+            let _ = write.close().await;
         });
 
         let sender = WsSender {
@@ -566,28 +599,26 @@ where
     ) -> std::task::Poll<Option<Self::Item>> {
         // Poll the underlying receiver
         let poll_result = Pin::new(&mut self.receiver).poll_next(cx);
-        let message_state = &mut self.message_state;
+        let _message_state = &mut self.message_state;
 
         match poll_result {
             std::task::Poll::Ready(Some(data)) => {
                 match bincode::deserialize::<WireMessage>(&data) {
-                    Ok(wire_msg) => {
-                        match bincode::deserialize(&wire_msg.payload) {
-                            Ok(msg) => std::task::Poll::Ready(Some(Ok(round_based::Incoming {
-                                id: wire_msg.id,
-                                sender: wire_msg.sender,
-                                msg,
-                                msg_type: wire_msg
-                                    .receiver
-                                    .map_or(round_based::MessageType::Broadcast, |_| {
-                                        round_based::MessageType::P2P
-                                    }),
-                            }))),
-                            Err(_) => std::task::Poll::Ready(Some(Err(NetworkError::Connection(
-                                "Failed to deserialize protocol message".into(),
-                            )))),
-                        }
-                    }
+                    Ok(wire_msg) => match bincode::deserialize(&wire_msg.payload) {
+                        Ok(msg) => std::task::Poll::Ready(Some(Ok(round_based::Incoming {
+                            id: wire_msg.id,
+                            sender: wire_msg.sender,
+                            msg,
+                            msg_type: wire_msg
+                                .receiver
+                                .map_or(round_based::MessageType::Broadcast, |_| {
+                                    round_based::MessageType::P2P
+                                }),
+                        }))),
+                        Err(_) => std::task::Poll::Ready(Some(Err(NetworkError::Connection(
+                            "Failed to deserialize protocol message".into(),
+                        )))),
+                    },
                     Err(_) => std::task::Poll::Ready(Some(Err(NetworkError::Connection(
                         "Failed to deserialize wire message".into(),
                     )))),

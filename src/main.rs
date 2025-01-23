@@ -59,13 +59,14 @@ mod network;
 mod protocol;
 mod server;
 mod service;
+mod signing;
 mod storage;
 
+use std::time::Duration;
 use clap::Parser;
+use futures_util::TryFutureExt;
 use error::Error;
-use protocol::run_committee_mode;
 use service::run_service_mode;
-use storage::KeyStorage;
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
@@ -179,7 +180,22 @@ async fn run_server_mode(server_addr: &str) -> Result<(), Error> {
     println!("WebSocket server listening for connections...");
 
     // Run the server (this blocks until shutdown)
-    server.run().await.map_err(|e| Error::Server(e))?;
+    server.run().await.map_err(Error::Server)?;
+
+    Ok(())
+}
+
+/// Runs the application in server mode, handling WebSocket connections
+pub async fn run_committee_mode(server_addr: String, party_id: u16) -> Result<(), Error> {
+    println!("Starting committee mode. Party: {}", party_id);
+
+    // Create and run the service
+    let mut protocol =
+        protocol::Protocol::new(party_id).map_err(|e| Error::Protocol(e.to_string())).await?;
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    protocol.start(server_addr, party_id).await?;
 
     Ok(())
 }

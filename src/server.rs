@@ -113,8 +113,12 @@ pub struct PartySession {
 #[derive(Serialize, Deserialize)]
 pub enum ServerMessage {
     /// Register with party ID
-    Register { session: PartySession },
-    Unregister { session: PartySession },
+    Register {
+        session: PartySession,
+    },
+    Unregister {
+        session: PartySession,
+    },
 }
 
 /// Represents a connected client session in the WebSocket server.
@@ -269,7 +273,7 @@ impl WsServer {
         stream: TcpStream,
         addr: SocketAddr,
         clients: Arc<RwLock<HashMap<PartySession, ClientSession>>>,
-        message_state: Arc<RwLock<MessageState>>,
+        _message_state: Arc<RwLock<MessageState>>,
     ) -> Result<(), ServerError> {
         let ws_stream = accept_async(stream).await?;
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
@@ -285,27 +289,22 @@ impl WsServer {
                                 // Handle registration
                                 let mut clients_lock = clients.write().await;
                                 if clients_lock.contains_key(&session) {
-                                    return Err(ServerError::Registration(
-                                        "Party ID already registered for committee session".into(),
-                                    ));
+                                    return Err(ServerError::Registration(format!(
+                                        "[S{}] Party {} already registered",
+                                        &session.session_id, &session.party_id
+                                    )));
                                 }
 
                                 clients_lock.insert(session.clone(), ClientSession { sender: tx });
 
                                 println!(
-                                    "Registered party ID {} with committee session {}",
-                                    &session.party_id, session.session_id
+                                    "[S{}] Registered party {}",
+                                    &session.session_id, session.party_id
                                 );
                                 break session;
                             }
                             Ok(ServerMessage::Unregister { session }) => {
-                                let mut clients_lock = clients.write().await;
-                                if clients_lock.remove(&session).is_some() {
-                                    println!(
-                                        "Unregistered party ID {} to committee session {}",
-                                        &session.party_id, session.session_id
-                                    );
-                                }
+                                let _ = Self::unregister_client(&session, &clients).await;
                                 return Ok(());
                             }
                             Err(e) => {
@@ -331,17 +330,9 @@ impl WsServer {
             async move {
                 while let Some(Ok(msg)) = ws_receiver.next().await {
                     if let Message::Binary(data) = msg {
-                        //println!("Received binary message from party {}", party_id);
 
                         // Try to deserialize as WireMessage (Protocol Message)
                         if let Ok(wire_msg) = bincode::deserialize::<WireMessage>(&data) {
-                            // Increment the message ID if ok or error and break if the monotonic increment validation fails
-                        /*    let mut message_state_lock = message_state.write().await;
-                            if let Err(e) = message_state_lock.validate_and_update_id(wire_msg.id) {
-                                println!("{}", e);
-                                break;
-                            }*/
-
                             Self::handle_client_message(
                                 &party_session,
                                 wire_msg,
@@ -358,20 +349,20 @@ impl WsServer {
                                 server_msg,
                                 &clients_for_receiver,
                             )
-                                .await;
+                            .await;
                             continue;
                         }
-                        
+
                         println!(
                             "Unable to deserialize message from party {}, session {}",
                             &party_session.party_id, &party_session.session_id
                         );
                     }
                 }
-                println!(
+                /*println!(
                     "Receiver loop ended for party {}, session {}",
                     &party_session.party_id, &party_session.session_id
-                );
+                );*/
             }
         });
 
@@ -380,18 +371,19 @@ impl WsServer {
             let party_session = party_session.clone();
             async move {
                 while let Some(msg) = rx.next().await {
-                    if let Err(e) = ws_sender.send(msg).await {
-                        println!(
+                    if (ws_sender.send(msg).await).is_err() {
+                        /*println!(
                             "Failed to send message to party {}, session {}: {}",
                             &party_session.party_id, &party_session.session_id, e
-                        );
+                        );*/
+                        let _ = Self::unregister_client(&party_session, &clients).await;
                         break;
                     }
                 }
-                println!(
+                /*println!(
                     "Sender loop ended for party {}, session {}",
                     &party_session.party_id, &party_session.session_id
-                );
+                );*/
             }
         });
 
@@ -407,24 +399,13 @@ impl WsServer {
         //println!("Handling server message from party {}", sender_id);
         match msg {
             ServerMessage::Register { session } => {
-                //TODO: Add session validation check here
-
                 println!(
-                    "Received registration message from party {} for session {}",
-                    session.party_id, session.session_id
+                    "[S{}] Party {} already registered!",
+                    &session.session_id, &session.party_id
                 );
-                // Registration is handled in handle_connection
             }
             ServerMessage::Unregister { session } => {
-                //TODO: Add session validation check here
-
-                println!(
-                    "Received unregister message from party {} for session {}",
-                    session.party_id, session.session_id
-                );
-
-                let mut clients_lock = clients.write().await;
-                clients_lock.remove(&session);
+                let _ = Self::unregister_client(&session, clients).await;
             }
         }
     }
@@ -442,8 +423,8 @@ impl WsServer {
             // P2P message
             Some(receiver_id) => {
                 println!(
-                    "P2P message from {} to {} for committee session {}",
-                    &party_session.party_id, receiver_id, &party_session.session_id
+                    "[S{}] P2P message from {} to {}",
+                    &party_session.session_id, &party_session.party_id, receiver_id
                 );
 
                 if let Some(client_session) = clients_lock.get(&PartySession {
@@ -461,15 +442,14 @@ impl WsServer {
             }
             // Broadcast message
             None => {
-                println!(
-                    "Broadcast message from {} for committee session {}",
-                    &party_session.party_id, &party_session.session_id
-                );
                 for (session, client_session) in clients_lock.iter() {
                     if session.party_id != party_session.party_id
                         && session.session_id == party_session.session_id
                     {
-                        println!("Broadcasting to {}", session.party_id);
+                        println!(
+                            "[S{}] Broadcast from party {}",
+                            session.session_id, session.party_id
+                        );
                         let encoded = bincode::serialize(&wire_msg)
                             .expect("Failed to serialize wire message");
                         let _ = client_session
@@ -479,5 +459,30 @@ impl WsServer {
                 }
             }
         }
+    }
+
+    /// Unregisters a client session from the server.
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - The party session to unregister
+    /// * `clients` - The shared client registry
+    ///
+    /// # Returns
+    ///
+    /// Returns Ok(()) if unregistration was successful, regardless of whether
+    /// the client was actually registered.
+    async fn unregister_client(
+        session: &PartySession,
+        clients: &Arc<RwLock<HashMap<PartySession, ClientSession>>>,
+    ) -> Result<(), ServerError> {
+        let mut clients_lock = clients.write().await;
+        if clients_lock.remove(session).is_some() {
+            println!(
+                "[S{}] Unregistered party {}",
+                &session.session_id, session.party_id
+            );
+        }
+        Ok(())
     }
 }
