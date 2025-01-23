@@ -40,6 +40,7 @@ use std::{
     pin::Pin,
     sync::atomic::{AtomicU64, Ordering},
 };
+use std::time::Duration;
 use tokio_tungstenite::connect_async;
 use tungstenite::Message;
 
@@ -255,6 +256,7 @@ where
 
         if let Ok(encoded) = bincode::serialize(&unreg_msg) {
             let _ = self.sender.unbounded_send(encoded);
+            std::thread::sleep(Duration::from_secs(1));
         }
     }
 }
