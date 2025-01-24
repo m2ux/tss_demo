@@ -65,9 +65,12 @@ impl MessageIdGenerator {
     /// Uses wrapping arithmetic to handle overflow gracefully, ensuring
     /// the counter continues from 0 after reaching u64::MAX.
     fn next_id(&self) -> u64 {
-        let Wrapping(next_id) = Wrapping(self.counter.load(Ordering::SeqCst)) + Wrapping(1);
-        self.counter.store(next_id, Ordering::SeqCst);
-        next_id
+        self.counter.fetch_add(1, Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub fn reset(&self) {
+        self.counter.store(0, Ordering::SeqCst);
     }
 }
 
@@ -105,19 +108,6 @@ pub enum NetworkError {
 /// The MessageState struct is responsible for maintaining and validating the order
 /// of messages in the network communication protocol. It uses wrapping arithmetic
 /// to handle message ID overflow gracefully when reaching u64::MAX.
-///
-/// # Examples
-///
-/// ```
-/// let mut state = MessageState::new();
-///
-/// // Validate a sequence of message IDs
-/// assert!(state.validate_and_update_id(1).is_ok());
-/// assert!(state.validate_and_update_id(2).is_ok());
-///
-/// // Out of order messages will return an error
-/// assert!(state.validate_and_update_id(1).is_err());
-/// ```
 #[derive(Debug)]
 pub struct MessageState {
     /// The last successfully validated message ID, wrapped to handle overflow
@@ -150,26 +140,14 @@ impl MessageState {
     ///
     /// Returns Ok(()) if the message ID is valid and in sequence.
     /// Returns Err(NetworkError::InvalidMessageId) if the message is out of sequence.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut state = MessageState::new();
-    ///
-    /// // Valid sequence
-    /// assert!(state.validate_and_update_id(1).is_ok());
-    /// assert!(state.validate_and_update_id(2).is_ok());
-    ///
-    /// // Invalid - out of sequence
-    /// assert!(state.validate_and_update_id(1).is_err());
-    /// ```
     pub fn validate_and_update_id(&mut self, id: u64) -> Result<(), NetworkError> {
-        let current = self.last_id;
         let new_id = Wrapping(id);
+        let diff = new_id - self.last_id;
 
-        if new_id < current {
+        // We expect IDs to increment by small values.
+        if diff.0 > u64::MAX / 2 {
             return Err(NetworkError::InvalidMessageId {
-                expected: current.0,
+                expected: self.last_id.0,
                 actual: id,
             });
         }
@@ -677,5 +655,436 @@ where
     /// Splits the delivery instance into separate sender and receiver components.
     fn split(self) -> (Self::Receive, Self::Send) {
         (self.receiver, self.sender)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+    use futures_util::FutureExt;
+    use round_based::MessageType;
+    use tokio::runtime::Runtime;
+
+    // MessageIdGenerator Tests
+    #[test]
+    fn test_message_id_generator() {
+        let gen = MessageIdGenerator::new();
+        assert_eq!(gen.next_id(), 0);
+        assert_eq!(gen.next_id(), 1);
+        assert_eq!(gen.next_id(), 2);
+    }
+
+    #[test]
+    fn test_message_id_generator_overflow() {
+        let gen = MessageIdGenerator::new();
+        gen.counter.store(u64::MAX, Ordering::SeqCst);
+        assert_eq!(gen.next_id(), u64::MAX);
+        assert_eq!(gen.next_id(), 0);
+        assert_eq!(gen.next_id(), 1);
+    }
+
+    #[test]
+    fn test_message_id_generator_thread_safety() {
+        let gen = Arc::new(MessageIdGenerator::new());
+        let mut handles = vec![];
+
+        for _ in 0..10 {
+            let gen_clone = Arc::clone(&gen);
+            handles.push(thread::spawn(move || {
+                for _ in 0..1000 {
+                    gen_clone.next_id();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(gen.next_id(), 10000);
+    }
+
+    // MessageState Tests
+    #[test]
+    fn test_message_state_valid_sequence() {
+        let mut state = MessageState::new();
+        assert!(state.validate_and_update_id(1).is_ok());
+        assert!(state.validate_and_update_id(2).is_ok());
+        assert!(state.validate_and_update_id(3).is_ok());
+    }
+
+    #[test]
+    fn test_message_state_invalid_sequence() {
+        let mut state = MessageState::new();
+        assert!(state.validate_and_update_id(1).is_ok());
+        assert!(state.validate_and_update_id(2).is_ok());
+        assert!(state.validate_and_update_id(1).is_err());
+    }
+
+    #[test]
+    fn test_message_state_overflow() {
+        let mut state = MessageState::new();
+        state.last_id = Wrapping(u64::MAX);
+        assert!(state.validate_and_update_id(0).is_ok());
+        assert!(state.validate_and_update_id(1).is_ok());
+    }
+
+    // WireMessage Tests
+    #[test]
+    fn test_wire_message_serialization() {
+        let test_msg = TestMessage {
+            content: "test content".to_string(),
+        };
+        let serialized_payload = bincode::serialize(&test_msg).unwrap();
+
+        let wire_msg = WireMessage {
+            id: 1,
+            sender: 2,
+            receiver: Some(3),
+            payload: serialized_payload,
+        };
+
+        let serialized = bincode::serialize(&wire_msg).unwrap();
+        let deserialized: WireMessage = bincode::deserialize(&serialized).unwrap();
+
+        assert_eq!(deserialized.id, wire_msg.id);
+        assert_eq!(deserialized.sender, wire_msg.sender);
+        assert_eq!(deserialized.receiver, wire_msg.receiver);
+        assert_eq!(deserialized.payload, wire_msg.payload);
+
+        // Verify payload can be deserialized back to TestMessage
+        let decoded_msg: TestMessage = bincode::deserialize(&deserialized.payload).unwrap();
+        assert_eq!(decoded_msg.content, "test content");
+    }
+
+    #[test]
+    fn test_wire_message_destination_conversion() {
+        let p2p_msg = WireMessage {
+            id: 1,
+            sender: 2,
+            receiver: Some(3),
+            payload: vec![],
+        };
+        assert_eq!(
+            p2p_msg.to_message_destination(),
+            Some(MessageDestination::OneParty(3))
+        );
+
+        let broadcast_msg = WireMessage {
+            id: 1,
+            sender: 2,
+            receiver: None,
+            payload: vec![],
+        };
+        assert_eq!(broadcast_msg.to_message_destination(), None);
+    }
+
+    // Integration Tests
+    #[tokio::test]
+    async fn test_ws_delivery_connect_error() {
+        let result = WsDelivery::<String>::connect(
+            "ws://invalid-address",
+            1,
+            1u16
+        ).await;
+        assert!(result.is_err());
+    }
+
+    // Mock message type for testing
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestMessage {
+        content: String,
+    }
+
+    #[test]
+    fn test_sender_receiver_channel_closure() {
+        let rt = Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let (tx, rx) = unbounded();
+            let sender: WsSender<TestMessage> = WsSender {
+                sender: tx,
+                party_id: 1,
+                session_id: 1,
+                _phantom: PhantomData,
+            };
+            let mut receiver: WsReceiver<TestMessage> = WsReceiver {
+                receiver: rx,
+                message_state: MessageState::new(),
+                _phantom: PhantomData,
+            };
+
+            // Use futures::StreamExt::now_or_never to check initial state
+            assert!(receiver.next().now_or_never().is_none(),
+                    "Channel should be empty initially");
+
+            // Drop sender which will trigger the Unregister message
+            drop(sender);
+
+            std::thread::sleep(Duration::from_secs(1));
+
+            // We should receive the unregister message before the channel closes
+            match receiver.next().await {
+                Some(Ok(received)) => {
+                    // The received message should be a TestMessage that contains our ServerMessage
+                    let server_msg: ServerMessage = bincode::deserialize(received.msg.content.as_bytes())
+                        .expect("Should be able to deserialize server message");
+
+                    match server_msg {
+                        ServerMessage::Unregister { session } => {
+                            assert_eq!(session.party_id, 1);
+                            assert_eq!(session.session_id, 1);
+                        },
+                        _ => panic!("Expected Unregister message, got different server message"),
+                    }
+                },
+                Some(Err(e)) => panic!("Received error instead of unregister message: {:?}", e),
+                None => panic!("Channel closed before receiving unregister message"),
+            }
+
+            // After the unregister message, the channel should close
+            assert!(receiver.next().await.is_none(),
+                    "Channel should be closed after unregister message");
+        });
+    }
+
+    #[test]
+    fn test_sender_drop_behavior() {
+        let rt = Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let (tx, rx) = unbounded();
+            let mut sender: WsSender<TestMessage> = WsSender {
+                sender: tx,
+                party_id: 42,  // Use different party_id to verify it's preserved
+                session_id: 123, // Use different session_id to verify it's preserved
+                _phantom: PhantomData,
+            };
+            let mut receiver: WsReceiver<TestMessage> = WsReceiver {
+                receiver: rx,
+                message_state: MessageState::new(),
+                _phantom: PhantomData,
+            };
+
+            // Send a normal message first
+            let test_msg = TestMessage {
+                content: "test before drop".to_string(),
+            };
+            sender.broadcast(test_msg).await.unwrap();
+
+            // Receive and verify the normal message
+            match receiver.next().await {
+                Some(Ok(msg)) => {
+                    assert_eq!(msg.msg.content, "test before drop");
+                },
+                _ => panic!("Failed to receive normal message"),
+            }
+
+            // Drop sender which will trigger the Unregister message
+            drop(sender);
+
+            std::thread::sleep(Duration::from_secs(1));
+
+            // Verify the unregister message is received
+            match receiver.next().await {
+                Some(Ok(received)) => {
+                    let server_msg: ServerMessage = bincode::deserialize(received.msg.content.as_bytes())
+                        .expect("Should be able to deserialize server message");
+
+                    match server_msg {
+                        ServerMessage::Unregister { session } => {
+                            assert_eq!(session.party_id, 42,
+                                       "Unregister should preserve party_id");
+                            assert_eq!(session.session_id, 123,
+                                       "Unregister should preserve session_id");
+                        },
+                        _ => panic!("Expected Unregister message, got: {:?}", server_msg),
+                    }
+                },
+                Some(Err(e)) => panic!("Received error instead of unregister message: {:?}", e),
+                None => panic!("Channel closed before receiving unregister message"),
+            }
+
+            // Verify channel closes after unregister
+            assert!(receiver.next().await.is_none(),
+                    "Channel should be closed after unregister message");
+        });
+    }
+
+    #[test]
+    fn test_message_validation_integration() {
+        MESSAGE_ID_GEN.reset();
+
+        let (tx, rx) = unbounded();
+        let mut sender: WsSender<TestMessage> = WsSender {
+            sender: tx,
+            party_id: 1,
+            session_id: 1,
+            _phantom: PhantomData,
+        };
+        let mut receiver: WsReceiver<TestMessage> = WsReceiver {
+            receiver: rx,
+            message_state: MessageState::new(),
+            _phantom: PhantomData,
+        };
+
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            // Send multiple test messages
+            let messages = [TestMessage {
+                    content: "test message 1".to_string(),
+                },
+                TestMessage {
+                    content: "test message 2".to_string(),
+                }];
+
+            // Send messages
+            for msg in messages.iter().cloned() {
+                let outgoing = Outgoing {
+                    msg,
+                    recipient: MessageDestination::AllParties,
+                };
+                sender.send(outgoing).await.unwrap();
+            }
+
+            // Receive and validate messages
+            for (i, expected_msg) in messages.iter().enumerate() {
+                if let Some(Ok(received)) = receiver.next().await {
+                    // Validate message content
+                    assert_eq!(received.msg.content, expected_msg.content);
+
+                    // Validate message metadata
+                    assert_eq!(received.sender, 1); // party_id of sender
+                    assert_eq!(received.msg_type, MessageType::Broadcast);
+
+                    // Validate message ordering
+                    assert_eq!(received.id, (i + 1) as u64); // IDs should start from 1
+                } else {
+                    panic!("Expected message not received");
+                }
+            }
+
+            // Verify no more messages are pending
+            assert!(receiver.next().now_or_never().is_none());
+        });
+    }
+
+    #[tokio::test]
+    async fn test_message_send_receive() {
+        let (tx, rx) = unbounded();
+        let mut sender: WsSender<TestMessage> = WsSender {
+            sender: tx,
+            party_id: 1,
+            session_id: 1,
+            _phantom: PhantomData,
+        };
+        let mut receiver: WsReceiver<TestMessage> = WsReceiver {
+            receiver: rx,
+            message_state: MessageState::new(),
+            _phantom: PhantomData,
+        };
+
+        // Test broadcast message
+        let broadcast_msg = TestMessage {
+            content: "broadcast test".to_string(),
+        };
+
+        MESSAGE_ID_GEN.reset();
+        sender.broadcast(broadcast_msg.clone()).await.unwrap();
+
+        // Verify broadcast message
+        if let Some(Ok(received)) = receiver.next().await {
+            assert_eq!(received.msg.content, "broadcast test");
+            assert_eq!(received.sender, 1);
+            assert_eq!(received.msg_type, MessageType::Broadcast);
+            assert_eq!(received.id, 0);
+        } else {
+            panic!("Expected broadcast message not received");
+        }
+
+        // Test p2p message
+        let p2p_msg = TestMessage {
+            content: "p2p test".to_string(),
+        };
+        sender.send_to(p2p_msg.clone(), 2).await.unwrap();
+
+        // Verify p2p message
+        if let Some(Ok(received)) = receiver.next().await {
+            assert_eq!(received.msg.content, "p2p test");
+            assert_eq!(received.sender, 1);
+            assert_eq!(received.msg_type, MessageType::P2P);
+            assert_eq!(received.id, 1);
+        } else {
+            panic!("Expected P2P message not received");
+        }
+
+        // Verify no more messages are pending
+        assert!(receiver.next().now_or_never().is_none());
+    }
+
+    // Test message delivery split
+    #[tokio::test]
+    async fn test_delivery_split() {
+        let (tx, rx) = unbounded();
+        let delivery = WsDelivery {
+            sender: WsSender {
+                sender: tx,
+                party_id: 1,
+                session_id: 1,
+                _phantom: PhantomData,
+            },
+            receiver: WsReceiver {
+                receiver: rx,
+                message_state: MessageState::new(),
+                _phantom: PhantomData,
+            },
+        };
+
+        let (mut receiver, mut sender): (WsReceiver<TestMessage>, WsSender<TestMessage>) = delivery.split();
+
+        // Verify sender metadata is preserved
+        assert_eq!(sender.party_id, 1);
+        assert_eq!(sender.session_id, 1);
+
+        // Test that split components can still communicate
+        let test_msg = TestMessage {
+            content: "split test".to_string(),
+        };
+
+        MESSAGE_ID_GEN.reset();
+
+        // Send a message using the split sender
+        sender.broadcast(test_msg.clone()).await.unwrap();
+
+        // Verify the split receiver can receive the message
+        if let Some(Ok(received)) = receiver.next().await {
+            assert_eq!(received.msg.content, "split test");
+            assert_eq!(received.sender, 1);
+            assert_eq!(received.msg_type, MessageType::Broadcast);
+            assert_eq!(received.id, 0);
+        } else {
+            panic!("Expected message not received after split");
+        }
+
+        // Test P2P message after split
+        let p2p_msg = TestMessage {
+            content: "p2p after split".to_string(),
+        };
+        sender.send_to(p2p_msg.clone(), 2).await.unwrap();
+
+        // Verify P2P message
+        if let Some(Ok(received)) = receiver.next().await {
+            assert_eq!(received.msg.content, "p2p after split");
+            assert_eq!(received.sender, 1);
+            assert_eq!(received.msg_type, MessageType::P2P);
+            assert_eq!(received.id, 1);
+        } else {
+            panic!("Expected P2P message not received after split");
+        }
+
+        // Verify no more messages are pending
+        assert!(receiver.next().now_or_never().is_none());
     }
 }

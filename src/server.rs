@@ -103,14 +103,14 @@ pub enum ServerError {
     Registration(String),
 }
 
-#[derive(Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct PartySession {
     pub party_id: u16,
     pub session_id: u16,
 }
 
 /// Message types for server-client communication
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum ServerMessage {
     /// Register with party ID
     Register {
@@ -329,6 +329,7 @@ impl WsServer {
             let party_session = party_session.clone();
             async move {
                 while let Some(Ok(msg)) = ws_receiver.next().await {
+
                     if let Message::Binary(data) = msg {
 
                         // Try to deserialize as WireMessage (Protocol Message)
