@@ -29,7 +29,6 @@
 //! }
 //! ```
 
-use crate::server::{PartySession, ServerMessage};
 use futures::channel::{mpsc, mpsc::unbounded};
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use round_based::{Delivery, Incoming, MessageDestination, Outgoing};
@@ -75,6 +74,31 @@ impl MessageIdGenerator {
 }
 
 static MESSAGE_ID_GEN: MessageIdGenerator = MessageIdGenerator::new();
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct PartySession {
+    pub party_id: u16,
+    pub session_id: u16,
+}
+
+/// Message type for session coordination
+#[derive(Serialize, Deserialize, Debug)]
+pub enum SessionMessage {
+    /// Register with party ID
+    Register {
+        session: PartySession,
+    },
+    Unregister {
+        session: PartySession,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MessageType {
+    Wire(WireMessage),
+    Session(SessionMessage),
+}
 
 /// Message sent by client to register with server
 #[derive(Serialize, Deserialize, Debug)]
@@ -199,7 +223,7 @@ where
     }
     /// Registers this party with the ws server
     async fn register(&self) -> Result<(), NetworkError> {
-        let reg_msg = ServerMessage::Register {
+        let reg_msg = SessionMessage::Register {
             session: PartySession {
                 party_id: self.party_id,
                 session_id: self.session_id,
@@ -225,7 +249,7 @@ where
     M: Serialize + for<'de> Deserialize<'de>,
 {
     fn drop(&mut self) {
-        let unreg_msg = ServerMessage::Unregister {
+        let unreg_msg = SessionMessage::Unregister {
             session: PartySession {
                 party_id: self.party_id,
                 session_id: self.session_id,
@@ -829,11 +853,11 @@ mod tests {
             match receiver.next().await {
                 Some(Ok(received)) => {
                     // The received message should be a TestMessage that contains our ServerMessage
-                    let server_msg: ServerMessage = bincode::deserialize(received.msg.content.as_bytes())
+                    let server_msg: SessionMessage = bincode::deserialize(received.msg.content.as_bytes())
                         .expect("Should be able to deserialize server message");
 
                     match server_msg {
-                        ServerMessage::Unregister { session } => {
+                        SessionMessage::Unregister { session } => {
                             assert_eq!(session.party_id, 1);
                             assert_eq!(session.session_id, 1);
                         },
@@ -890,11 +914,11 @@ mod tests {
             // Verify the unregister message is received
             match receiver.next().await {
                 Some(Ok(received)) => {
-                    let server_msg: ServerMessage = bincode::deserialize(received.msg.content.as_bytes())
+                    let server_msg: SessionMessage = bincode::deserialize(received.msg.content.as_bytes())
                         .expect("Should be able to deserialize server message");
 
                     match server_msg {
-                        ServerMessage::Unregister { session } => {
+                        SessionMessage::Unregister { session } => {
                             assert_eq!(session.party_id, 42,
                                        "Unregister should preserve party_id");
                             assert_eq!(session.session_id, 123,

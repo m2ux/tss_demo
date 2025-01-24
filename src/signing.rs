@@ -336,7 +336,7 @@ impl Signing {
 
     /// Executes the signing protocol state machine.
     ///
-    /// This is the core protocol execution loop that manages state transitions and 
+    /// This is the core protocol execution loop that manages state transitions and
     /// coordinates the distributed signing process. It handles protocol events, manages
     /// state transitions, and coordinates communication between parties.
     ///
@@ -364,7 +364,7 @@ impl Signing {
     ///           ^                        ┌───────────┐
     ///           └──────────────────────  │  Signing  │
     ///               SigningComplete      └───────────┘
-    ///                               
+    ///
     /// ```
     ///
     /// # Arguments
@@ -633,7 +633,7 @@ impl Signing {
                                 }
                                 Err(e) => {
                                     println!("- Signing failed, {}", e);
-                                    context.event(Input::SigningComplete);
+                                    context.event(Input::SigningSkipped);
                                 }
                             }
                             tokio::time::sleep(Duration::from_millis((50 * party_id) as u64)).await;
@@ -699,8 +699,8 @@ impl Signing {
 
 /// Handles incoming protocol messages from all participating parties.
 ///
-/// Processes and dispatches incoming protocol messages to maintain distributed signing state 
-/// coordination. This function runs as a separate task, continuously receiving and processing 
+/// Processes and dispatches incoming protocol messages to maintain distributed signing state
+/// coordination. This function runs as a separate task, continuously receiving and processing
 /// messages until the connection is closed or an error occurs.
 ///
 /// # Message Processing Flow

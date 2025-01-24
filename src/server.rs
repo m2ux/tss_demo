@@ -65,7 +65,7 @@
 //! * Message serialization errors
 //! * Client registration conflicts
 
-use crate::network::{MessageState, WireMessage};
+use crate::network::{MessageState, WireMessage, PartySession, SessionMessage};
 use futures::channel::{mpsc, mpsc::unbounded};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -101,24 +101,6 @@ pub enum ServerError {
     /// Client registration errors (e.g., duplicate party ID, invalid format)
     #[error("Client registration error: {0}")]
     Registration(String),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct PartySession {
-    pub party_id: u16,
-    pub session_id: u16,
-}
-
-/// Message types for server-client communication
-#[derive(Serialize, Deserialize, Debug)]
-pub enum ServerMessage {
-    /// Register with party ID
-    Register {
-        session: PartySession,
-    },
-    Unregister {
-        session: PartySession,
-    },
 }
 
 /// Represents a connected client session in the WebSocket server.
@@ -157,6 +139,7 @@ pub struct WsServer {
     /// Thread-safe registry of connected clients
     clients: Arc<RwLock<HashMap<PartySession, ClientSession>>>,
 
+    /// Message state control data
     message_state: Arc<RwLock<MessageState>>,
 
     /// Socket address the server is bound to
@@ -284,8 +267,8 @@ impl WsServer {
             match ws_receiver.next().await {
                 Some(Ok(msg)) => {
                     if let Message::Binary(data) = msg {
-                        match bincode::deserialize::<ServerMessage>(&data) {
-                            Ok(ServerMessage::Register { session }) => {
+                        match bincode::deserialize::<SessionMessage>(&data) {
+                            Ok(SessionMessage::Register { session }) => {
                                 // Handle registration
                                 let mut clients_lock = clients.write().await;
                                 if clients_lock.contains_key(&session) {
@@ -303,7 +286,7 @@ impl WsServer {
                                 );
                                 break session;
                             }
-                            Ok(ServerMessage::Unregister { session }) => {
+                            Ok(SessionMessage::Unregister { session }) => {
                                 let _ = Self::unregister_client(&session, &clients).await;
                                 return Ok(());
                             }
@@ -344,7 +327,7 @@ impl WsServer {
                         }
 
                         // Try to deserialize as ServerMessage
-                        if let Ok(server_msg) = bincode::deserialize::<ServerMessage>(&data) {
+                        if let Ok(server_msg) = bincode::deserialize::<SessionMessage>(&data) {
                             Self::handle_server_message(
                                 &party_session,
                                 server_msg,
@@ -394,18 +377,18 @@ impl WsServer {
     /// Handles server-specific messages
     async fn handle_server_message(
         _party_session: &PartySession,
-        msg: ServerMessage,
+        msg: SessionMessage,
         clients: &Arc<RwLock<HashMap<PartySession, ClientSession>>>,
     ) {
         //println!("Handling server message from party {}", sender_id);
         match msg {
-            ServerMessage::Register { session } => {
+            SessionMessage::Register { session } => {
                 println!(
                     "[S{}] Party {} already registered!",
                     &session.session_id, &session.party_id
                 );
             }
-            ServerMessage::Unregister { session } => {
+            SessionMessage::Unregister { session } => {
                 let _ = Self::unregister_client(&session, clients).await;
             }
         }
