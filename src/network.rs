@@ -82,7 +82,7 @@ pub struct PartySession {
 }
 
 /// Message type for session coordination
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SessionMessage {
     /// Register with party ID
     Register {
@@ -276,7 +276,7 @@ pub struct WsReceiver<M> {
 /// Internal message format for wire transmission.
 ///
 /// Encapsulates all necessary metadata for message delivery and ordering.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct WireMessage {
     /// Monotonically increasing message identifier
     pub id: u64,
