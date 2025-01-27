@@ -33,13 +33,13 @@ use futures::channel::{mpsc, mpsc::unbounded};
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use round_based::{Delivery, Incoming, MessageDestination, Outgoing};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use std::{
     marker::PhantomData,
     num::Wrapping,
     pin::Pin,
     sync::atomic::{AtomicU64, Ordering},
 };
-use std::time::Duration;
 use tokio_tungstenite::connect_async;
 use tungstenite::Message;
 
@@ -75,36 +75,11 @@ impl MessageIdGenerator {
 
 static MESSAGE_ID_GEN: MessageIdGenerator = MessageIdGenerator::new();
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct PartySession {
-    pub party_id: u16,
-    pub session_id: u16,
-}
-
 /// Message type for session coordination
 #[derive(Serialize, Deserialize, Debug)]
 pub enum SessionMessage {
-    /// Register with party ID
-    Register {
-        session: PartySession,
-    },
-    Unregister {
-        session: PartySession,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum MessageType {
-    Wire(WireMessage),
-    Session(SessionMessage),
-}
-
-/// Message sent by client to register with server
-#[derive(Serialize, Deserialize, Debug)]
-pub enum ClientRegistration {
-    /// Initial registration message with party ID
-    Register { party_id: u16 },
+    Register(u16),
+    Unregister(u16),
 }
 
 /// Errors that can occur during network operations.
@@ -188,7 +163,7 @@ impl MessageState {
 #[derive(Clone)]
 pub struct WsSender<M>
 where
-    M: Serialize + for<'de> Deserialize<'de>,
+    M: Serialize + for<'de> Deserialize<'de> + Unpin,
 {
     sender: mpsc::UnboundedSender<Vec<u8>>,
     party_id: u16,
@@ -221,24 +196,15 @@ where
         // Use the Sink trait's send method
         self.send(outgoing).await
     }
-    /// Registers this party with the ws server
-    async fn register(&self) -> Result<(), NetworkError> {
-        let reg_msg = SessionMessage::Register {
-            session: PartySession {
-                party_id: self.party_id,
-                session_id: self.session_id,
-            },
-        };
-        let serialized = bincode::serialize(&reg_msg)
-            .map_err(|_| NetworkError::Connection("Serialization failed".into()))?;
-
-        self.sender
-            .unbounded_send(serialized)
-            .map_err(|_| NetworkError::ChannelClosed)?;
-
-        Ok(())
+    /// Register the party with this session
+    async fn register(&mut self) -> Result<(), NetworkError> {
+        self.send(SessionMessage::Register(self.session_id)).await
     }
-
+    /// Unregister the party with this session
+    async fn unregister(&mut self) -> Result<(), NetworkError> {
+        self.send(SessionMessage::Unregister(self.session_id)).await
+    }
+    
     pub fn get_party_id(&self) -> u16 {
         self.party_id
     }
@@ -246,19 +212,16 @@ where
 
 impl<M> Drop for WsSender<M>
 where
-    M: Serialize + for<'de> Deserialize<'de>,
+    M: Serialize + for<'de> Deserialize<'de> + Unpin,
 {
     fn drop(&mut self) {
-        let unreg_msg = SessionMessage::Unregister {
-            session: PartySession {
-                party_id: self.party_id,
-                session_id: self.session_id,
-            },
-        };
+        // Create a new runtime for the blocking operation
+        let rt = tokio::runtime::Runtime::new().unwrap();
 
-        if let Ok(encoded) = bincode::serialize(&unreg_msg) {
-            let _ = self.sender.unbounded_send(encoded);
-            std::thread::sleep(Duration::from_secs(1));
+        // Execute the unregister call synchronously
+        if let Ok(_) = rt.block_on(self.unregister()) {
+            // Allow time for unregister message to be sent
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 }
@@ -309,7 +272,7 @@ impl WireMessage {
 /// combining both sending and receiving capabilities.
 pub struct WsDelivery<M>
 where
-    M: Serialize + for<'de> Deserialize<'de>,
+    M: Serialize + for<'de> Deserialize<'de> + Unpin,
 {
     sender: WsSender<M>,
     receiver: WsReceiver<M>,
@@ -401,9 +364,7 @@ where
             session_id: session_id.into(),
             _phantom: PhantomData,
         };
-
-        sender.register().await?;
-
+        
         Ok(Self {
             sender,
             receiver: WsReceiver {
@@ -412,6 +373,45 @@ where
                 _phantom: PhantomData,
             },
         })
+    }
+}
+
+// A trait for things that can be sent over the network
+pub trait NetworkPayload {
+    fn to_wire_payload(&self) -> Result<Vec<u8>, NetworkError>;
+    fn get_receiver(&self) -> Option<u16> {
+        None  // Default to broadcast
+    }
+}
+
+// Implement for Outgoing<M>
+impl<M> NetworkPayload for Outgoing<M>
+where
+    M: Serialize + for<'de> Deserialize<'de>,
+{
+    fn to_wire_payload(&self) -> Result<Vec<u8>, NetworkError> {
+        bincode::serialize(&self.msg)
+            .map_err(|_| NetworkError::Connection("Serialization failed".into()))
+    }
+
+    fn get_receiver(&self) -> Option<u16> {
+        match self.recipient {
+            MessageDestination::OneParty(id) => Some(id),
+            MessageDestination::AllParties => None,
+        }
+    }
+}
+
+// Implement for SessionMessage
+impl NetworkPayload for SessionMessage {
+    fn to_wire_payload(&self) -> Result<Vec<u8>, NetworkError> {
+        bincode::serialize(self)
+            .map_err(|_| NetworkError::Connection("Serialization failed".into()))
+    }
+
+    // Session messages are always broadcast
+    fn get_receiver(&self) -> Option<u16> {
+        None
     }
 }
 
@@ -449,9 +449,10 @@ where
 /// - No internal buffering is performed
 /// - Message ordering is maintained through unique, monotonic IDs
 /// - The implementation is thread-safe and can be used across async tasks
-impl<M> Sink<Outgoing<M>> for WsSender<M>
+impl<M, T> Sink<T> for WsSender<M>
 where
-    M: serde::Serialize + for<'de> serde::Deserialize<'de>,
+    M: Serialize + for<'de> Deserialize<'de> + Unpin,
+    T: NetworkPayload,
 {
     type Error = NetworkError;
 
@@ -487,13 +488,12 @@ where
     /// - `Ok(())`: Message was successfully queued for sending
     /// - `Err(NetworkError::Connection)`: Serialization of message failed
     /// - `Err(NetworkError::ChannelClosed)`: The sending channel has been closed
-    fn start_send(self: Pin<&mut Self>, item: Outgoing<M>) -> Result<(), Self::Error> {
+    fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
         let wire_msg = WireMessage {
             id: MESSAGE_ID_GEN.next_id(),
             sender: self.party_id,
-            receiver: WireMessage::from_message_destination(Some(item.recipient)),
-            payload: bincode::serialize(&item.msg)
-                .map_err(|_| NetworkError::Connection("Serialization failed".into()))?,
+            receiver: item.get_receiver(),
+            payload: item.to_wire_payload()?,
         };
 
         let encoded = bincode::serialize(&wire_msg)
@@ -685,10 +685,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::thread;
     use futures_util::FutureExt;
     use round_based::MessageType;
+    use std::sync::Arc;
+    use std::thread;
     use tokio::runtime::Runtime;
 
     // MessageIdGenerator Tests
@@ -808,11 +808,7 @@ mod tests {
     // Integration Tests
     #[tokio::test]
     async fn test_ws_delivery_connect_error() {
-        let result = WsDelivery::<String>::connect(
-            "ws://invalid-address",
-            1,
-            1u16
-        ).await;
+        let result = WsDelivery::<String>::connect("ws://invalid-address", 1, 1u16).await;
         assert!(result.is_err());
     }
 
@@ -823,118 +819,101 @@ mod tests {
     }
 
     #[test]
+    fn test_sender_drop_behavior() {
+        let rt = Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded();
+            let sender: WsSender<TestMessage> = WsSender {
+                sender: tx,
+                party_id: 42,    // Use different party_id to verify it's preserved
+                session_id: 123, // Use different session_id to verify it's preserved
+                _phantom: PhantomData,
+            };
+
+            // Drop sender which will trigger the Unregister message
+            drop(sender);
+
+            // Wait a bit to ensure message is processed
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Verify the unregister message is received
+            if let Some(data) = rx.next().await {
+                let wire_msg: WireMessage = bincode::deserialize(&data)
+                    .expect("Should be able to deserialize wire message");
+
+                let session_msg: SessionMessage = bincode::deserialize(&wire_msg.payload)
+                    .expect("Should be able to deserialize session message");
+
+                match session_msg {
+                    SessionMessage::Unregister(id) => {
+                        assert_eq!(id, 123, "Session ID should match");
+                        assert_eq!(wire_msg.sender, 42, "Party ID should match");
+                        assert!(wire_msg.receiver.is_none(), "Should be broadcast message");
+                    },
+                    _ => panic!("Expected Unregister message"),
+                }
+            } else {
+                panic!("No unregister message received");
+            }
+
+            // Verify channel closes after unregister
+            assert!(rx.next().await.is_none(), "Channel should be closed after unregister");
+        });
+    }
+
+    #[test]
     fn test_sender_receiver_channel_closure() {
         let rt = Runtime::new().unwrap();
 
         rt.block_on(async {
-            let (tx, rx) = unbounded();
+            let (tx, mut rx) = unbounded();
             let sender: WsSender<TestMessage> = WsSender {
                 sender: tx,
                 party_id: 1,
                 session_id: 1,
                 _phantom: PhantomData,
             };
-            let mut receiver: WsReceiver<TestMessage> = WsReceiver {
-                receiver: rx,
-                message_state: MessageState::new(),
-                _phantom: PhantomData,
-            };
 
             // Use futures::StreamExt::now_or_never to check initial state
-            assert!(receiver.next().now_or_never().is_none(),
-                    "Channel should be empty initially");
+            assert!(
+                rx.next().now_or_never().is_none(),
+                "Channel should be empty initially"
+            );
 
             // Drop sender which will trigger the Unregister message
             drop(sender);
 
-            std::thread::sleep(Duration::from_secs(1));
+            // Wait for unregister message
+            if let Some(data) = rx.next().await {
+                let wire_msg: WireMessage = bincode::deserialize(&data)
+                    .expect("Should be able to deserialize wire message");
 
-            // We should receive the unregister message before the channel closes
-            match receiver.next().await {
-                Some(Ok(received)) => {
-                    // The received message should be a TestMessage that contains our ServerMessage
-                    let server_msg: SessionMessage = bincode::deserialize(received.msg.content.as_bytes())
-                        .expect("Should be able to deserialize server message");
+                let session_msg: SessionMessage = bincode::deserialize(&wire_msg.payload)
+                    .expect("Should be able to deserialize session message");
 
-                    match server_msg {
-                        SessionMessage::Unregister { session } => {
-                            assert_eq!(session.party_id, 1);
-                            assert_eq!(session.session_id, 1);
-                        },
-                        _ => panic!("Expected Unregister message, got different server message"),
-                    }
-                },
-                Some(Err(e)) => panic!("Received error instead of unregister message: {:?}", e),
-                None => panic!("Channel closed before receiving unregister message"),
+                match session_msg {
+                    SessionMessage::Unregister(id) => {
+                        assert_eq!(id, 1);
+                        assert_eq!(wire_msg.sender, 1);
+                        assert!(wire_msg.receiver.is_none());
+                    },
+                    _ => panic!("Expected Unregister message"),
+                }
+            } else {
+                panic!("No unregister message received");
             }
 
-            // After the unregister message, the channel should close
-            assert!(receiver.next().await.is_none(),
-                    "Channel should be closed after unregister message");
+            // Verify channel closes
+            assert!(rx.next().await.is_none(), "Channel should be closed");
         });
     }
-
-    #[test]
-    fn test_sender_drop_behavior() {
-        let rt = Runtime::new().unwrap();
-
-        rt.block_on(async {
-            let (tx, rx) = unbounded();
-            let mut sender: WsSender<TestMessage> = WsSender {
-                sender: tx,
-                party_id: 42,  // Use different party_id to verify it's preserved
-                session_id: 123, // Use different session_id to verify it's preserved
-                _phantom: PhantomData,
-            };
-            let mut receiver: WsReceiver<TestMessage> = WsReceiver {
-                receiver: rx,
-                message_state: MessageState::new(),
-                _phantom: PhantomData,
-            };
-
-            // Send a normal message first
-            let test_msg = TestMessage {
-                content: "test before drop".to_string(),
-            };
-            sender.broadcast(test_msg).await.unwrap();
-
-            // Receive and verify the normal message
-            match receiver.next().await {
-                Some(Ok(msg)) => {
-                    assert_eq!(msg.msg.content, "test before drop");
-                },
-                _ => panic!("Failed to receive normal message"),
-            }
-
-            // Drop sender which will trigger the Unregister message
-            drop(sender);
-
-            std::thread::sleep(Duration::from_secs(1));
-
-            // Verify the unregister message is received
-            match receiver.next().await {
-                Some(Ok(received)) => {
-                    let server_msg: SessionMessage = bincode::deserialize(received.msg.content.as_bytes())
-                        .expect("Should be able to deserialize server message");
-
-                    match server_msg {
-                        SessionMessage::Unregister { session } => {
-                            assert_eq!(session.party_id, 42,
-                                       "Unregister should preserve party_id");
-                            assert_eq!(session.session_id, 123,
-                                       "Unregister should preserve session_id");
-                        },
-                        _ => panic!("Expected Unregister message, got: {:?}", server_msg),
-                    }
-                },
-                Some(Err(e)) => panic!("Received error instead of unregister message: {:?}", e),
-                None => panic!("Channel closed before receiving unregister message"),
-            }
-
-            // Verify channel closes after unregister
-            assert!(receiver.next().await.is_none(),
-                    "Channel should be closed after unregister message");
-        });
+    
+    impl NetworkPayload for TestMessage {
+        fn to_wire_payload(&self) -> Result<Vec<u8>, NetworkError> {
+            bincode::serialize(self)
+                .map_err(|_| NetworkError::Connection("Serialization failed".into()))
+        }
     }
 
     #[test]
@@ -957,12 +936,14 @@ mod tests {
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
             // Send multiple test messages
-            let messages = [TestMessage {
+            let messages = [
+                TestMessage {
                     content: "test message 1".to_string(),
                 },
                 TestMessage {
                     content: "test message 2".to_string(),
-                }];
+                },
+            ];
 
             // Send messages
             for msg in messages.iter().cloned() {
@@ -1066,7 +1047,8 @@ mod tests {
             },
         };
 
-        let (mut receiver, mut sender): (WsReceiver<TestMessage>, WsSender<TestMessage>) = delivery.split();
+        let (mut receiver, mut sender): (WsReceiver<TestMessage>, WsSender<TestMessage>) =
+            delivery.split();
 
         // Verify sender metadata is preserved
         assert_eq!(sender.party_id, 1);

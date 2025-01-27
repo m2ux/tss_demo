@@ -30,7 +30,7 @@
 //! ```
 
 use crate::error::Error;
-use crate::network::{WsDelivery, WsReceiver, WsSender};
+use crate::network::{SessionMessage, WsDelivery, WsReceiver, WsSender};
 use crate::protocol::{CommitteeSession, ControlMessage};
 use crate::signing::SigningProtocolMessage;
 use futures_util::StreamExt;
@@ -53,7 +53,7 @@ state_machine! {
     /// - Failed: Triggers transition to Exit from any state
     #[derive(Debug)]
     service(SendingRequest)
-    
+
     SendingRequest => {
         RequestSent => Exit,
         Failed => Exit
@@ -152,7 +152,7 @@ impl Service {
         .await?;
 
         let (control_receiver, _) = control_delivery.split();
-
+        
         // Create delivery instance for signing messages
         let signing_delivery = WsDelivery::<SigningProtocolMessage>::connect(
             &server_addr,
@@ -168,7 +168,7 @@ impl Service {
         let monitor_handle = tokio::spawn(async move {
             monitor_ready_sign_messages(context_clone, control_receiver).await
         });
-        
+
         // Run the main service loop
         let result = self.run_machine(signing_sender).await;
         

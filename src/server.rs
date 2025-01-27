@@ -65,7 +65,7 @@
 //! * Message serialization errors
 //! * Client registration conflicts
 
-use crate::network::{MessageState, WireMessage, PartySession, SessionMessage};
+use crate::network::{MessageState, WireMessage, SessionMessage};
 use futures::channel::{mpsc, mpsc::unbounded};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -116,6 +116,12 @@ pub enum ServerError {
 struct ClientSession {
     /// Channel for sending messages to the client
     sender: mpsc::UnboundedSender<Message>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct PartySession {
+    pub party_id: u16,
+    pub session_id: u16,
 }
 
 /// WebSocket server for handling protocol communication.
