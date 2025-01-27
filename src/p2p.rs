@@ -1,47 +1,30 @@
 use crate::network::{MessageState, PartySession, SessionMessage, WireMessage};
-use futures::{AsyncRead, AsyncWrite, StreamExt};
-use libp2p_core::transport::{Boxed, OrTransport, upgrade::Version};
-use libp2p_identify as identify;
-use libp2p_identity::{self, Keypair, PeerId, PublicKey};
-use libp2p_kad::{
-    self,
-    store::MemoryStore,
-    Behaviour as KademliaBehaviour,
-    Config as KademliaConfig,
-    Event as KademliaEvent,
-};
-use libp2p_noise as noise;
-use libp2p_request_response::{
-    self, Behaviour as RequestResponseBehaviour, Codec as RequestResponseCodec, Config as RequestResponseConfig,
-    Event as RequestResponseEvent, Message as RequestMessage, ProtocolSupport,
-    ResponseChannel,
-};
-use libp2p_swarm::{
-    NetworkBehaviour,
-    Swarm,
-    SwarmEvent,
-    ConnectionHandler,
-    ToSwarm,
-};
-use libp2p_tcp as tcp;
-use libp2p_yamux as yamux;
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    io,
-    sync::Arc,
-    task::{Context, Poll},
-    time::Duration,
-};
-use std::future::Future;
-use std::pin::Pin;
 use async_trait::async_trait;
+use futures::{AsyncRead, AsyncWrite, StreamExt};
 use futures_util::{AsyncReadExt, AsyncWriteExt};
 use libp2p::kad::QueryResult;
 use libp2p::Multiaddr;
+use libp2p_core::transport::upgrade::Version;
 use libp2p_core::Transport;
+use libp2p_identify as identify;
+use libp2p_identity::{self, Keypair, PeerId};
+use libp2p_kad::{
+    self, store::MemoryStore, Behaviour as KademliaBehaviour, Config as KademliaConfig,
+    Event as KademliaEvent,
+};
+use libp2p_request_response::{
+    self, Behaviour as RequestResponseBehaviour, Codec as RequestResponseCodec,
+    Config as RequestResponseConfig, Event as RequestResponseEvent, Message as RequestMessage,
+    ProtocolSupport,
+};
+use libp2p_swarm::{NetworkBehaviour, Swarm, SwarmEvent};
+use libp2p_tcp as tcp;
+use libp2p_yamux as yamux;
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, io, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::sync::RwLock;
+
 /// Protocol version for compatibility checking
 const PROTOCOL_VERSION: &str = "cggmp21/1.0.0";
 
@@ -72,7 +55,7 @@ pub struct P2PConfig {
 pub enum CggmpBehaviourEvent {
     RequestResponse(RequestResponseEvent<P2PMessage, ()>),
     Kademlia(KademliaEvent),
-    Identify(identify::Event),
+    Identify(Box<identify::Event>),
 }
 
 #[derive(NetworkBehaviour)]
@@ -98,7 +81,7 @@ impl From<KademliaEvent> for CggmpBehaviourEvent {
 
 impl From<identify::Event> for CggmpBehaviourEvent {
     fn from(event: identify::Event) -> Self {
-        CggmpBehaviourEvent::Identify(event)
+        CggmpBehaviourEvent::Identify(Box::from(event))
     }
 }
 
@@ -108,8 +91,7 @@ pub enum P2PMessage {
     Session(SessionMessage),
 }
 
-#[derive(Clone)]
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct CggmpCodec;
 
 pub struct P2PNode {
@@ -129,7 +111,7 @@ impl P2PNode {
         let noise_config =
             libp2p_noise::Config::new(&id_keys).map_err(|e| P2PError::Protocol(e.to_string()))?;
 
-        // Create transport with noise encryption and yamux multiplexing
+        // Create transport with noise encryption and multiplexing
         let transport = tcp::tokio::Transport::new(tcp::Config::default())
             .upgrade(Version::V1Lazy)
             .authenticate(noise_config)
@@ -145,11 +127,7 @@ impl P2PNode {
         // Create Kademlia DHT
         let store = MemoryStore::new(peer_id);
         let kad_config = KademliaConfig::default();
-        let kademlia = KademliaBehaviour::with_config(
-            peer_id,
-            store,
-            kad_config,
-        );
+        let kademlia = KademliaBehaviour::with_config(peer_id, store, kad_config);
 
         // Create identify protocol
         let identify = identify::Behaviour::new(identify::Config::new(
@@ -168,14 +146,9 @@ impl P2PNode {
         let swarm_config = libp2p_swarm::Config::with_executor(Box::new(|fut| {
             tokio::spawn(fut);
         }))
-            .with_idle_connection_timeout(Duration::from_secs(60));
+        .with_idle_connection_timeout(Duration::from_secs(60));
 
-        let mut swarm = libp2p_swarm::Swarm::new(
-            transport,
-            behaviour,
-            peer_id,
-            swarm_config,
-        );
+        let mut swarm = Swarm::new(transport, behaviour, peer_id, swarm_config);
 
         // Listen on provided addresses
         for addr in config.listen_addresses {
@@ -198,9 +171,10 @@ impl P2PNode {
     async fn handle_protocol_message(&mut self, msg: &WireMessage) -> Result<(), P2PError> {
         // Get message state first
         let mut message_state = self.message_state.write().await;
-        message_state.validate_and_update_id(msg.id)
+        message_state
+            .validate_and_update_id(msg.id)
             .map_err(|e| P2PError::Protocol(e.to_string()))?;
-        drop(message_state); // Release the lock
+        drop(message_state);
 
         match msg.receiver {
             Some(receiver_id) => {
@@ -218,7 +192,11 @@ impl P2PNode {
         Ok(())
     }
 
-    async fn handle_session_message(&mut self, peer: PeerId, msg: SessionMessage) -> Result<(), P2PError> {
+    async fn handle_session_message(
+        &mut self,
+        peer: PeerId,
+        msg: SessionMessage,
+    ) -> Result<(), P2PError> {
         match msg {
             SessionMessage::Register { session } => {
                 self.peers.write().await.insert(peer, session.clone());
@@ -235,8 +213,9 @@ impl P2PNode {
                 };
 
                 if should_disconnect {
-                    self.swarm.disconnect_peer_id(peer)
-                        .map_err(|e| P2PError::Swarm(format!("{:?}",e)))?;
+                    self.swarm
+                        .disconnect_peer_id(peer)
+                        .map_err(|e| P2PError::Swarm(format!("{:?}", e)))?;
                     println!("Unregistered peer {} with session {:?}", peer, session);
                 }
             }
@@ -245,7 +224,10 @@ impl P2PNode {
     }
 
     /// Handles incoming events from the swarm
-    pub async fn handle_event(&mut self, event: SwarmEvent<CggmpBehaviourEvent>) -> Result<(), P2PError> {
+    pub async fn handle_event(
+        &mut self,
+        event: SwarmEvent<CggmpBehaviourEvent>,
+    ) -> Result<(), P2PError> {
         match event {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 println!("Connected to peer: {}", peer_id);
@@ -257,17 +239,21 @@ impl P2PNode {
             }
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 if let Some(session) = self.peers.write().await.remove(&peer_id) {
-                    println!("Peer disconnected: {} (Party {})", peer_id, session.party_id);
+                    println!(
+                        "Peer disconnected: {} (Party {})",
+                        peer_id, session.party_id
+                    );
                 }
             }
             SwarmEvent::Behaviour(CggmpBehaviourEvent::RequestResponse(event)) => {
                 match event {
                     RequestResponseEvent::Message {
                         peer,
-                        message: RequestMessage::Request {
-                            request,
-                            channel, ..
-                        }, ..
+                        message:
+                            RequestMessage::Request {
+                                request, channel, ..
+                            },
+                        ..
                     } => {
                         // Handle the message first
                         match request {
@@ -288,8 +274,16 @@ impl P2PNode {
                             .send_response(channel, ())
                             .map_err(|_| P2PError::Protocol("Failed to send response".into()))?;
                     }
-                    RequestResponseEvent::OutboundFailure { peer, request_id, error, .. } => {
-                        println!("Outbound failure to {} for request {}: {:?}", peer, request_id, error);
+                    RequestResponseEvent::OutboundFailure {
+                        peer,
+                        request_id,
+                        error,
+                        ..
+                    } => {
+                        println!(
+                            "Outbound failure to {} for request {}: {:?}",
+                            peer, request_id, error
+                        );
                     }
                     RequestResponseEvent::InboundFailure { peer, error, .. } => {
                         println!("Inbound failure from {}: {:?}", peer, error);
@@ -300,8 +294,13 @@ impl P2PNode {
             SwarmEvent::Behaviour(CggmpBehaviourEvent::Kademlia(event)) => {
                 // Handle Kademlia events with updated event types
                 match event {
-                    KademliaEvent::RoutingUpdated { peer, is_new_peer, .. } => {
-                        println!("Kademlia routing updated for peer: {} (new: {})", peer, is_new_peer);
+                    KademliaEvent::RoutingUpdated {
+                        peer, is_new_peer, ..
+                    } => {
+                        println!(
+                            "Kademlia routing updated for peer: {} (new: {})",
+                            peer, is_new_peer
+                        );
                     }
                     KademliaEvent::OutboundQueryProgressed {
                         id: _id,
@@ -309,38 +308,33 @@ impl P2PNode {
                         stats: _stats,
                         step: _step,
                         ..
-                    } => {
-                        match result {
-                            QueryResult::GetClosestPeers(Ok(peers)) => {
-                                println!("Found closest peers: {:?}", peers);
-                            }
-                            QueryResult::GetProviders(Ok(providers)) => {
-                                println!("Found providers: {:?}", providers);
-                            }
-                            QueryResult::GetRecord(Ok(records)) => {
-                                println!("Found records: {:?}", records);
-                            }
-                            QueryResult::PutRecord(Ok(_)) => {
-                                println!("Successfully put record");
-                            }
-                            QueryResult::StartProviding(Ok(_)) => {
-                                println!("Successfully started providing");
-                            }
-                            err => {
-                                println!("Kademlia query error: {:?}", err);
-                            }
+                    } => match result {
+                        QueryResult::GetClosestPeers(Ok(peers)) => {
+                            println!("Found closest peers: {:?}", peers);
                         }
-                    }
+                        QueryResult::GetProviders(Ok(providers)) => {
+                            println!("Found providers: {:?}", providers);
+                        }
+                        QueryResult::GetRecord(Ok(records)) => {
+                            println!("Found records: {:?}", records);
+                        }
+                        QueryResult::PutRecord(Ok(_)) => {
+                            println!("Successfully put record");
+                        }
+                        QueryResult::StartProviding(Ok(_)) => {
+                            println!("Successfully started providing");
+                        }
+                        err => {
+                            println!("Kademlia query error: {:?}", err);
+                        }
+                    },
                     _ => {}
                 }
             }
             SwarmEvent::Behaviour(CggmpBehaviourEvent::Identify(event)) => {
                 // Handle Identify events
-                match event {
-                    identify::Event::Received { peer_id, info, .. } => {
-                        println!("Received identify info from {}: {:?}", peer_id, info);
-                    }
-                    _ => {}
+                if let identify::Event::Received { peer_id, info, .. } = *event {
+                    println!("Received identify info from {}: {:?}", peer_id, info);
                 }
             }
             _ => {}
@@ -352,19 +346,19 @@ impl P2PNode {
     pub async fn run(&mut self) -> Result<(), P2PError> {
         loop {
             tokio::select! {
-            event = self.swarm.select_next_some() => {
-                self.handle_event(event).await?;
+                event = self.swarm.select_next_some() => {
+                    self.handle_event(event).await?;
+                }
             }
-        }
         }
     }
 
     /// Sends a message to a specific peer
     pub async fn send_message(&mut self, peer_id: PeerId, msg: P2PMessage) -> Result<(), P2PError> {
-        self.swarm.behaviour_mut().request_response.send_request(
-            &peer_id,
-            msg,
-        );
+        self.swarm
+            .behaviour_mut()
+            .request_response
+            .send_request(&peer_id, msg);
         Ok(())
     }
 
@@ -373,7 +367,8 @@ impl P2PNode {
         // First, collect the peers we need to send to
         let peers_to_send: Vec<(PeerId, PartySession)> = {
             let peers = self.peers.read().await;
-            peers.iter()
+            peers
+                .iter()
                 .filter(|(_, session)| session.session_id == self.local_session.session_id)
                 .map(|(peer_id, session)| (*peer_id, session.clone()))
                 .collect()
@@ -381,10 +376,10 @@ impl P2PNode {
 
         // Then send the message to each peer
         for (peer_id, _) in peers_to_send {
-            self.swarm.behaviour_mut().request_response.send_request(
-                &peer_id,
-                msg.clone(),
-            );
+            self.swarm
+                .behaviour_mut()
+                .request_response
+                .send_request(&peer_id, msg.clone());
         }
 
         Ok(())
@@ -392,7 +387,9 @@ impl P2PNode {
 
     /// Gets the list of connected peers
     pub async fn get_connected_peers(&self) -> Vec<(PeerId, PartySession)> {
-        self.peers.read().await
+        self.peers
+            .read()
+            .await
             .iter()
             .map(|(peer_id, session)| (*peer_id, session.clone()))
             .collect()
@@ -402,7 +399,9 @@ impl P2PNode {
 impl Drop for P2PNode {
     fn drop(&mut self) {
         // Attempt to gracefully disconnect from all peers
-        let peers: Vec<_> = self.peers.try_read()
+        let peers: Vec<_> = self
+            .peers
+            .try_read()
             .map(|peers| peers.keys().cloned().collect())
             .unwrap_or_default();
 
@@ -428,8 +427,7 @@ impl RequestResponseCodec for CggmpCodec {
     {
         let mut buf = Vec::new();
         io.read_to_end(&mut buf).await?;
-        bincode::deserialize(&buf)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        bincode::deserialize(&buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
 
     async fn read_response<T>(
