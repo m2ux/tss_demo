@@ -1,11 +1,92 @@
+//! P2P networking implementation for CGGMP protocol communication.
+//!
+//! This module provides a decentralized peer-to-peer networking layer for the CGGMP21 protocol,
+//! It handles peer discovery, message routing, and session management using the libp2p networking 
+//! stack.
+//!
+//! # Architecture
+//!
+//! The P2P implementation consists of several key components:
+//!
+//! * `P2PNode`: The main node implementation that manages network connections and protocol handling
+//! * `CggmpBehaviour`: Network behavior implementation combining multiple libp2p protocols
+//! * `CggmpCodec`: Protocol codec for serializing and deserializing CGGMP messages
+//!
+//! # Features
+//!
+//! * Decentralized peer discovery using Kademlia DHT
+//! * Direct peer-to-peer message routing
+//! * Session-based protocol communication
+//! * Support for both broadcast and targeted messages
+//! * Secure transport using noise protocol
+//!
+//! # Protocol Stack
+//!
+//! The implementation uses the following libp2p protocols:
+//!
+//! * TCP transport with noise encryption
+//! * Yamux connection multiplexing
+//! * Kademlia DHT for peer discovery
+//! * Request-response protocol for message exchange
+//! * Identify protocol for peer information
+//!
+//! # Example Usage
+//!
+//! ```rust,no_run
+//! use crate::p2p::{P2PNode, P2PConfig};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let config = P2PConfig {
+//!         party_id: 1,
+//!         session_id: 1,
+//!         bootstrap_peers: vec![],
+//!         listen_addresses: vec!["127.0.0.1:8000".parse()?],
+//!     };
+//!
+//!     let mut node = P2PNode::new(config).await?;
+//!     node.run().await?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Message Flow
+//!
+//! 1. Node startup and peer discovery
+//! 2. Session establishment with peers
+//! 3. Protocol message exchange (broadcast or P2P)
+//! 4. Session termination and cleanup
+//!
+//! # Error Handling
+//!
+//! The module provides comprehensive error handling through the `P2PError` enum,
+//! covering transport, protocol, and network-related errors.
+//!
+//! # Security Considerations
+//!
+//! * All connections are encrypted using the noise protocol
+//! * Session-based message isolation
+//! * Peer authentication through libp2p identity system
+//! * Message validation and ordering guarantees
+//!
+//! # Dependencies
+//!
+//! * `libp2p`: Core P2P networking stack
+//! * `tokio`: Async runtime
+//! * `serde`: Message serialization
+//! * `bincode`: Binary encoding
+//!
+//! This implementation replaces the previous WebSocket-based networking layer,
+//! providing better scalability and removing single points of failure while
+//! maintaining the security and reliability requirements of the CGGMP protocol.
+//! 
 use crate::network::{MessageState, PartySession, SessionMessage, WireMessage};
 use async_trait::async_trait;
 use futures::{AsyncRead, AsyncWrite, StreamExt};
 use futures_util::{AsyncReadExt, AsyncWriteExt};
 use libp2p::kad::QueryResult;
 use libp2p::Multiaddr;
-use libp2p_core::transport::upgrade::Version;
-use libp2p_core::Transport;
+use libp2p_core::{transport::upgrade::Version, Transport};
 use libp2p_identify as identify;
 use libp2p_identity::{self, Keypair, PeerId};
 use libp2p_kad::{
