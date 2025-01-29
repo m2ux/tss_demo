@@ -60,7 +60,7 @@ state_machine! {
     }
 }
 
-use crate::ws_delivery::WsDelivery;
+use crate::ws_network::WsDelivery;
 use service::Input;
 
 /// Environment data for the service state machine.

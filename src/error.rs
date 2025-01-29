@@ -25,7 +25,6 @@
 //! }
 //! ```
 
-use crate::ws_delivery::DeliveryError;
 use crate::network;
 use crate::server::ServerError;
 use crate::storage;

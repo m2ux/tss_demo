@@ -31,7 +31,7 @@
 
 use futures::channel::{mpsc, mpsc::unbounded};
 use futures::{Sink, SinkExt, Stream, StreamExt};
-use round_based::{Incoming, MessageDestination, Outgoing};
+use round_based::{Delivery, Incoming, MessageDestination, Outgoing};
 use serde::{Deserialize, Serialize};
 use std::{
     marker::PhantomData,
@@ -511,6 +511,144 @@ where
     }
 }
 
+/// Errors that can occur during stream operations.
+#[derive(Debug, thiserror::Error)]
+pub enum DeliveryError {
+    /// Stream communication errors
+    #[error("Stream error: {0}")]
+    Communication(String),
+
+    /// Message processing errors
+    #[error("Message processing error: {0}")]
+    Processing(String),
+}
+
+/// Stream-based delivery mechanism implementing `round_based::Delivery`.
+///
+/// Provides the main interface for stream-based network communication,
+/// combining both sending and receiving capabilities over any stream
+/// that implements the required traits.
+pub struct StreamDelivery<M, S, E>
+where
+    M: Serialize + for<'de> Deserialize<'de>,
+    S: Stream<Item = Result<Vec<u8>, E>> + Sink<Vec<u8>, Error = E> + Unpin,
+    E: std::error::Error + 'static,
+{
+    sender: Sender<M>,
+    receiver: Receiver<M>,
+    _stream: PhantomData<S>,
+    _error: PhantomData<E>,
+}
+
+impl<M, S, E> StreamDelivery<M, S, E>
+where
+    M: Serialize + for<'de> Deserialize<'de> + Unpin,
+    S: Stream<Item = Result<Vec<u8>, E>> + Sink<Vec<u8>, Error = E> + Unpin + Send + 'static,
+    E: std::error::Error + Send + 'static,
+{
+    /// Creates a new delivery instance from a stream that implements Stream + Sink
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - Any stream that implements Stream + Sink for binary data
+    /// * `party_id` - Unique identifier for this party
+    /// * `session_id` - Unique identifier for this session
+    ///
+    /// # Errors
+    ///
+    /// Returns `NetworkError` if initialization fails
+    pub async fn new(
+        stream: S,
+        party_id: u16,
+        session_id: impl Into<u16>,
+    ) -> Result<Self, NetworkError> {
+        let (write, read) = stream.split();
+
+        let (stream_rcvr_tx, stream_rcvr_rx) = unbounded();
+        let (stream_sender_tx, mut stream_sender_rx) = unbounded();
+
+        // Spawn background task to handle stream communication
+        tokio::spawn(async move {
+            let mut write = write;
+            let mut read = read;
+
+            loop {
+                tokio::select! {
+                    // Handle incoming messages
+                    msg = read.next() => {
+                        match msg {
+                            Some(Ok(data)) => {
+                                if stream_rcvr_tx.unbounded_send(data).is_err() {
+                                    break;
+                                }
+                            }
+                            Some(Err(_)) => {
+                                break;
+                            }
+                            None => {
+                                break;
+                            }
+                        }
+                    }
+                    // Handle outgoing messages
+                    msg = stream_sender_rx.next() => {
+                        match msg {
+                            Some(data) => {
+                                if let Err(_) = write.send(data).await {
+                                    break;
+                                }
+                            }
+                            None => {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let sender = Sender {
+            sender: stream_sender_tx,
+            party_id,
+            session_id: session_id.into(),
+            _phantom: PhantomData,
+        };
+
+        sender
+            .register()
+            .await
+            .map_err(|e| NetworkError::Delivery(e.to_string()))?;
+
+        Ok(Self {
+            sender,
+            receiver: Receiver {
+                receiver: stream_rcvr_rx,
+                message_state: MessageState::new(),
+                _phantom: PhantomData,
+            },
+            _stream: PhantomData,
+            _error: PhantomData,
+        })
+    }
+}
+
+/// Implements the Delivery trait for stream-based message transport.
+impl<M, S, E> Delivery<M> for StreamDelivery<M, S, E>
+where
+    M: Serialize + for<'de> Deserialize<'de> + Unpin,
+    S: Stream<Item = Result<Vec<u8>, E>> + Sink<Vec<u8>, Error = E> + Unpin,
+    E: std::error::Error + 'static,
+{
+    type Send = Sender<M>;
+    type Receive = Receiver<M>;
+    type SendError = NetworkError;
+    type ReceiveError = NetworkError;
+
+    fn split(self) -> (Self::Receive, Self::Send) {
+        (self.receiver, self.sender)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,6 +658,54 @@ mod tests {
     use round_based::MessageType;
     use tokio::runtime::Runtime;
 
+    // Mock stream for testing
+    struct MockStream {
+        incoming: mpsc::UnboundedReceiver<Result<Vec<u8>, std::io::Error>>,
+        outgoing: mpsc::UnboundedSender<Vec<u8>>,
+    }
+
+    impl Stream for MockStream {
+        type Item = Result<Vec<u8>, std::io::Error>;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            self.incoming.poll_next_unpin(cx)
+        }
+    }
+
+    impl Sink<Vec<u8>> for MockStream {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, item: Vec<u8>) -> Result<(), Self::Error> {
+            self.outgoing
+                .unbounded_send(item)
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "send failed"))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+    
     // MessageIdGenerator Tests
     #[test]
     fn test_message_id_generator() {

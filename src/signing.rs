@@ -54,7 +54,7 @@ use crate::network::{Receiver, Sender};
 use crate::protocol::CommitteeSession;
 use crate::signing::signing_protocol::Input;
 use crate::storage::KeyStorage;
-use crate::ws_delivery::WsDelivery;
+use crate::ws_network::WsDelivery;
 use cggmp21::supported_curves::Secp256k1;
 use cggmp21::{ExecutionId, Signature};
 use futures_util::StreamExt;

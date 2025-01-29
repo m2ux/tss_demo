@@ -53,7 +53,6 @@
 //! * Curve: secp256k1
 //! * Hash function: SHA256
 
-mod committee;
 mod error;
 mod network;
 mod protocol;
@@ -62,8 +61,7 @@ mod service;
 mod signing;
 mod storage;
 mod p2p;
-mod p2p_delivery;
-mod ws_delivery;
+mod ws_network;
 
 use std::time::Duration;
 use clap::Parser;
