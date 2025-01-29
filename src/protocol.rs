@@ -27,7 +27,7 @@ use crate::network;
 use crate::network::{Receiver, Sender};
 use crate::signing::Signing;
 use crate::storage::KeyStorage;
-use crate::ws_network::WsDelivery;
+use crate::websocket::WsDelivery;
 use cggmp21::key_share::AuxInfo;
 use cggmp21::{
     key_refresh::AuxOnlyMsg, keygen::ThresholdMsg, security_level::SecurityLevel128,

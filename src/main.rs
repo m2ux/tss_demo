@@ -61,7 +61,7 @@ mod service;
 mod signing;
 mod storage;
 mod p2p;
-mod ws_network;
+mod websocket;
 
 use std::time::Duration;
 use clap::Parser;
