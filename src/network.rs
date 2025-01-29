@@ -31,7 +31,7 @@
 
 use futures::channel::{mpsc, mpsc::unbounded};
 use futures::{Sink, SinkExt, Stream, StreamExt};
-use round_based::{Delivery, Incoming, MessageDestination, Outgoing};
+use round_based::{Incoming, MessageDestination, Outgoing};
 use serde::{Deserialize, Serialize};
 use std::{
     marker::PhantomData,
@@ -40,8 +40,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
-use tokio_tungstenite::connect_async;
-use tungstenite::Message;
 
 /// Thread-safe message ID generator with overflow handling.
 ///
@@ -53,7 +51,7 @@ struct MessageIdGenerator {
 
 impl MessageIdGenerator {
     /// Creates a new MessageIdGenerator starting from 0.
-    const fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             counter: AtomicU64::new(0),
         }
@@ -63,7 +61,7 @@ impl MessageIdGenerator {
     ///
     /// Uses wrapping arithmetic to handle overflow gracefully, ensuring
     /// the counter continues from 0 after reaching u64::MAX.
-    fn next_id(&self) -> u64 {
+    pub fn next_id(&self) -> u64 {
         self.counter.fetch_add(1, Ordering::SeqCst)
     }
 
@@ -73,7 +71,7 @@ impl MessageIdGenerator {
     }
 }
 
-static MESSAGE_ID_GEN: MessageIdGenerator = MessageIdGenerator::new();
+pub static MESSAGE_ID_GEN: MessageIdGenerator = MessageIdGenerator::new();
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct PartySession {
@@ -93,13 +91,6 @@ pub enum SessionMessage {
     },
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum MessageType {
-    Wire(WireMessage),
-    Session(SessionMessage),
-}
-
 /// Message sent by client to register with server
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ClientRegistration {
@@ -110,9 +101,9 @@ pub enum ClientRegistration {
 /// Errors that can occur during network operations.
 #[derive(Debug, thiserror::Error)]
 pub enum NetworkError {
-    /// WebSocket protocol errors
-    #[error("WebSocket error: {0}")]
-    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    /// Delivery protocol errors
+    #[error("Delivery error: {0}")]
+    Delivery(String),
 
     /// General connection errors (initialization, serialization, etc.)
     #[error("Connection error: {0}")]
@@ -181,22 +172,22 @@ impl MessageState {
     }
 }
 
-/// WebSocket message sender component.
+/// Message sender component.
 ///
-/// Handles sending messages to other parties through the WebSocket connection.
+/// Handles sending messages to other parties through the connection.
 /// Implements the `Sink` trait for outgoing messages.
 #[derive(Clone)]
-pub struct WsSender<M>
+pub struct Sender<M>
 where
     M: Serialize + for<'de> Deserialize<'de>,
 {
-    sender: mpsc::UnboundedSender<Vec<u8>>,
-    party_id: u16,
-    session_id: u16,
-    _phantom: PhantomData<M>,
+    pub sender: mpsc::UnboundedSender<Vec<u8>>,
+    pub party_id: u16,
+    pub session_id: u16,
+    pub _phantom: PhantomData<M>,
 }
 
-impl<M> WsSender<M>
+impl<M> Sender<M>
 where
     M: Serialize + for<'de> Deserialize<'de> + Unpin,
 {
@@ -222,7 +213,7 @@ where
         self.send(outgoing).await
     }
     /// Registers this party with the ws server
-    async fn register(&self) -> Result<(), NetworkError> {
+    pub async fn register(&self) -> Result<(), NetworkError> {
         let reg_msg = SessionMessage::Register {
             session: PartySession {
                 party_id: self.party_id,
@@ -244,7 +235,7 @@ where
     }
 }
 
-impl<M> Drop for WsSender<M>
+impl<M> Drop for Sender<M>
 where
     M: Serialize + for<'de> Deserialize<'de>,
 {
@@ -261,16 +252,6 @@ where
             std::thread::sleep(Duration::from_secs(1));
         }
     }
-}
-
-/// WebSocket message receiver component.
-///
-/// Handles receiving and validating messages from other parties.
-/// Implements the `Stream` trait for incoming messages.
-pub struct WsReceiver<M> {
-    receiver: mpsc::UnboundedReceiver<Vec<u8>>,
-    message_state: MessageState,
-    _phantom: PhantomData<M>,
 }
 
 /// Internal message format for wire transmission.
@@ -299,118 +280,6 @@ impl WireMessage {
         dest.and_then(|d| match d {
             MessageDestination::OneParty(id) => Some(id),
             MessageDestination::AllParties => None,
-        })
-    }
-}
-
-/// Combined WebSocket delivery mechanism implementing `round_based::Delivery`.
-///
-/// Provides the main interface for WebSocket-based network communication,
-/// combining both sending and receiving capabilities.
-pub struct WsDelivery<M>
-where
-    M: Serialize + for<'de> Deserialize<'de>,
-{
-    sender: WsSender<M>,
-    receiver: WsReceiver<M>,
-}
-
-impl<M> WsDelivery<M>
-where
-    M: Serialize + for<'de> Deserialize<'de> + std::marker::Unpin,
-{
-    /// Establishes a new WebSocket connection to the specified server.
-    ///
-    /// # Arguments
-    ///
-    /// * `server_addr` - WebSocket server address (e.g., "ws://localhost:8080")
-    /// * `session_id` - Unique identifier for this session
-    ///
-    /// # Errors
-    ///
-    /// Returns `NetworkError` if connection fails or initialization errors occur.
-    pub async fn connect<S>(
-        server_addr: &str,
-        party_id: u16,
-        session_id: S,
-    ) -> Result<Self, NetworkError>
-    where
-        S: Into<u16>,
-    {
-        let (ws_stream, _) = connect_async(server_addr)
-            .await
-            .map_err(NetworkError::WebSocket)?;
-
-        let (mut write, read) = ws_stream.split();
-
-        // Handle incoming WebSocket messages
-        let (ws_rcvr_tx, ws_rcvr_rx) = unbounded();
-        let (ws_sender_tx, mut ws_sender_rx) = unbounded();
-
-        tokio::spawn(async move {
-            let mut read = read;
-            loop {
-                tokio::select! {
-                    // Handle incoming messages
-                    msg = read.next() => {
-                        match msg {
-                            Some(Ok(Message::Binary(data))) => {
-                                if ws_rcvr_tx.unbounded_send(data).is_err() {
-                                    //println!("Receiver channel closed, terminating");
-                                    break;
-                                }
-                            }
-                            Some(Ok(_)) => {
-                                continue;
-                            }
-                            Some(Err(_)) => {
-                                //println!("WebSocket read error: {}", e);
-                                break;
-                            }
-                            None => {
-                                println!("WebSocket connection closed by peer");
-                                break;
-                            }
-                        }
-                    }
-                    // Handle outgoing messages
-                    msg = ws_sender_rx.next() => {
-                        match msg {
-                            Some(data) => {
-                                if let Err(e) = write.send(Message::Binary(data)).await {
-                                    println!("WebSocket write error: {}", e);
-                                    break;
-                                }
-                            }
-                            None => {
-                                //println!("Sender channel closed, terminating");
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Attempt to close the connection gracefully
-            let _ = write.close().await;
-        });
-
-        let sender = WsSender {
-            sender: ws_sender_tx,
-            party_id,
-            session_id: session_id.into(),
-            _phantom: PhantomData,
-        };
-
-        sender.register().await?;
-
-        Ok(Self {
-            sender,
-            receiver: WsReceiver {
-                receiver: ws_rcvr_rx,
-                message_state: MessageState::new(),
-                _phantom: PhantomData,
-            },
         })
     }
 }
@@ -449,7 +318,7 @@ where
 /// - No internal buffering is performed
 /// - Message ordering is maintained through unique, monotonic IDs
 /// - The implementation is thread-safe and can be used across async tasks
-impl<M> Sink<Outgoing<M>> for WsSender<M>
+impl<M> Sink<Outgoing<M>> for Sender<M>
 where
     M: serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
@@ -535,8 +404,18 @@ where
     }
 }
 
+/// Message receiver component.
+///
+/// Handles receiving and validating messages from other parties.
+/// Implements the `Stream` trait for incoming messages.
+pub struct Receiver<M> {
+    pub receiver: mpsc::UnboundedReceiver<Vec<u8>>,
+    pub message_state: MessageState,
+    pub _phantom: PhantomData<M>,
+}
+
 // Explicitly implement Unpin for WsReceiver
-impl<M> Unpin for WsReceiver<M> {}
+impl<M> Unpin for Receiver<M> {}
 
 /// Implements the Stream trait for WebSocket message receiving.
 ///
@@ -569,7 +448,7 @@ impl<M> Unpin for WsReceiver<M> {}
 /// - Message IDs are validated to ensure proper sequencing
 /// - Failed message processing results in appropriate NetworkError variants
 /// - The implementation is compatible with async stream combinators
-impl<M> Stream for WsReceiver<M>
+impl<M> Stream for Receiver<M>
 where
     M: serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
@@ -607,7 +486,7 @@ where
             std::task::Poll::Ready(Some(data)) => {
                 match bincode::deserialize::<WireMessage>(&data) {
                     Ok(wire_msg) => match bincode::deserialize(&wire_msg.payload) {
-                        Ok(msg) => std::task::Poll::Ready(Some(Ok(round_based::Incoming {
+                        Ok(msg) => std::task::Poll::Ready(Some(Ok(Incoming {
                             id: wire_msg.id,
                             sender: wire_msg.sender,
                             msg,
@@ -629,56 +508,6 @@ where
             std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
-    }
-}
-
-/// Implements the Delivery trait for WebSocket-based message transport.
-///
-/// This implementation provides a complete message delivery system that:
-/// - Manages both sending and receiving of messages
-/// - Handles connection lifecycle
-/// - Ensures reliable message delivery
-/// - Supports splitting into separate send and receive components
-///
-/// # Type Parameters
-///
-/// * `M` - The message type that must be serializable, deserializable, and Unpin
-///
-/// # Examples
-///
-/// ```rust,no_run
-/// use round_based::Delivery;
-///
-/// async fn setup_communication() -> Result<(), NetworkError> {
-///     // Create the delivery instance
-///     let delivery = WsDelivery::connect("ws://localhost:8080", 1).await?;
-///
-///     // Split into sender and receiver
-///     let (receiver, sender) = delivery.split();
-///
-///     // Use sender and receiver independently
-///     Ok(())
-/// }
-/// ```
-///
-/// # Implementation Notes
-///
-/// - The implementation is fully async and supports concurrent operations
-/// - Sender and receiver can be used independently after splitting
-/// - All message guarantees are maintained after splitting
-/// - The implementation is compatible with the round-based protocol requirements
-impl<M> Delivery<M> for WsDelivery<M>
-where
-    M: serde::Serialize + for<'de> serde::Deserialize<'de> + Unpin,
-{
-    type Send = WsSender<M>;
-    type Receive = WsReceiver<M>;
-    type SendError = NetworkError;
-    type ReceiveError = NetworkError;
-
-    /// Splits the delivery instance into separate sender and receiver components.
-    fn split(self) -> (Self::Receive, Self::Send) {
-        (self.receiver, self.sender)
     }
 }
 
@@ -805,17 +634,6 @@ mod tests {
         assert_eq!(broadcast_msg.to_message_destination(), None);
     }
 
-    // Integration Tests
-    #[tokio::test]
-    async fn test_ws_delivery_connect_error() {
-        let result = WsDelivery::<String>::connect(
-            "ws://invalid-address",
-            1,
-            1u16
-        ).await;
-        assert!(result.is_err());
-    }
-
     // Mock message type for testing
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TestMessage {
@@ -828,13 +646,13 @@ mod tests {
 
         rt.block_on(async {
             let (tx, rx) = unbounded();
-            let sender: WsSender<TestMessage> = WsSender {
+            let sender: Sender<TestMessage> = Sender {
                 sender: tx,
                 party_id: 1,
                 session_id: 1,
                 _phantom: PhantomData,
             };
-            let mut receiver: WsReceiver<TestMessage> = WsReceiver {
+            let mut receiver: Receiver<TestMessage> = Receiver {
                 receiver: rx,
                 message_state: MessageState::new(),
                 _phantom: PhantomData,
@@ -880,13 +698,13 @@ mod tests {
 
         rt.block_on(async {
             let (tx, rx) = unbounded();
-            let mut sender: WsSender<TestMessage> = WsSender {
+            let mut sender: Sender<TestMessage> = Sender {
                 sender: tx,
                 party_id: 42,  // Use different party_id to verify it's preserved
                 session_id: 123, // Use different session_id to verify it's preserved
                 _phantom: PhantomData,
             };
-            let mut receiver: WsReceiver<TestMessage> = WsReceiver {
+            let mut receiver: Receiver<TestMessage> = Receiver {
                 receiver: rx,
                 message_state: MessageState::new(),
                 _phantom: PhantomData,
@@ -942,13 +760,13 @@ mod tests {
         MESSAGE_ID_GEN.reset();
 
         let (tx, rx) = unbounded();
-        let mut sender: WsSender<TestMessage> = WsSender {
+        let mut sender: Sender<TestMessage> = Sender {
             sender: tx,
             party_id: 1,
             session_id: 1,
             _phantom: PhantomData,
         };
-        let mut receiver: WsReceiver<TestMessage> = WsReceiver {
+        let mut receiver: Receiver<TestMessage> = Receiver {
             receiver: rx,
             message_state: MessageState::new(),
             _phantom: PhantomData,
@@ -998,13 +816,13 @@ mod tests {
     #[tokio::test]
     async fn test_message_send_receive() {
         let (tx, rx) = unbounded();
-        let mut sender: WsSender<TestMessage> = WsSender {
+        let mut sender: Sender<TestMessage> = Sender {
             sender: tx,
             party_id: 1,
             session_id: 1,
             _phantom: PhantomData,
         };
-        let mut receiver: WsReceiver<TestMessage> = WsReceiver {
+        let mut receiver: Receiver<TestMessage> = Receiver {
             receiver: rx,
             message_state: MessageState::new(),
             _phantom: PhantomData,
@@ -1042,70 +860,6 @@ mod tests {
             assert_eq!(received.id, 1);
         } else {
             panic!("Expected P2P message not received");
-        }
-
-        // Verify no more messages are pending
-        assert!(receiver.next().now_or_never().is_none());
-    }
-
-    // Test message delivery split
-    #[tokio::test]
-    async fn test_delivery_split() {
-        let (tx, rx) = unbounded();
-        let delivery = WsDelivery {
-            sender: WsSender {
-                sender: tx,
-                party_id: 1,
-                session_id: 1,
-                _phantom: PhantomData,
-            },
-            receiver: WsReceiver {
-                receiver: rx,
-                message_state: MessageState::new(),
-                _phantom: PhantomData,
-            },
-        };
-
-        let (mut receiver, mut sender): (WsReceiver<TestMessage>, WsSender<TestMessage>) = delivery.split();
-
-        // Verify sender metadata is preserved
-        assert_eq!(sender.party_id, 1);
-        assert_eq!(sender.session_id, 1);
-
-        // Test that split components can still communicate
-        let test_msg = TestMessage {
-            content: "split test".to_string(),
-        };
-
-        MESSAGE_ID_GEN.reset();
-
-        // Send a message using the split sender
-        sender.broadcast(test_msg.clone()).await.unwrap();
-
-        // Verify the split receiver can receive the message
-        if let Some(Ok(received)) = receiver.next().await {
-            assert_eq!(received.msg.content, "split test");
-            assert_eq!(received.sender, 1);
-            assert_eq!(received.msg_type, MessageType::Broadcast);
-            assert_eq!(received.id, 0);
-        } else {
-            panic!("Expected message not received after split");
-        }
-
-        // Test P2P message after split
-        let p2p_msg = TestMessage {
-            content: "p2p after split".to_string(),
-        };
-        sender.send_to(p2p_msg.clone(), 2).await.unwrap();
-
-        // Verify P2P message
-        if let Some(Ok(received)) = receiver.next().await {
-            assert_eq!(received.msg.content, "p2p after split");
-            assert_eq!(received.sender, 1);
-            assert_eq!(received.msg_type, MessageType::P2P);
-            assert_eq!(received.id, 1);
-        } else {
-            panic!("Expected P2P message not received after split");
         }
 
         // Verify no more messages are pending

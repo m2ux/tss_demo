@@ -80,10 +80,10 @@
 //! providing better scalability and removing single points of failure while
 //! maintaining the security and reliability requirements of the CGGMP protocol.
 //! 
-use crate::network::{MessageState, PartySession, SessionMessage, WireMessage};
+use crate::network::{MessageState, NetworkError, PartySession, SessionMessage, WireMessage};
 use async_trait::async_trait;
-use futures::{AsyncRead, AsyncWrite, StreamExt};
-use futures_util::{AsyncReadExt, AsyncWriteExt};
+use futures::{AsyncRead, AsyncWrite, channel::mpsc::unbounded, StreamExt};
+use futures_util::{AsyncReadExt, AsyncWriteExt, FutureExt};
 use libp2p::kad::QueryResult;
 use libp2p::Multiaddr;
 use libp2p_core::{transport::upgrade::Version, Transport};
@@ -105,9 +105,21 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::sync::RwLock;
+use tungstenite::Message;
+use std::sync::Mutex;
+use libp2p_core::muxing::StreamMuxerBox;
+use libp2p_core::transport::Boxed;
+use round_based::{Incoming, MessageType};
 
 /// Protocol version for compatibility checking
 const PROTOCOL_VERSION: &str = "cggmp21/1.0.0";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum P2PMessage {
+    Protocol(Vec<u8>),
+    Session(SessionMessage),
+}
 
 #[derive(Error, Debug)]
 pub enum P2PError {
@@ -124,6 +136,10 @@ pub enum P2PError {
     Network(String),
 }
 
+/// Configuration for a P2P node in the CGGMP protocol network
+///
+/// Contains essential parameters for initializing and operating a P2P node,
+/// including party identification, session management, and network addressing.
 #[derive(Clone, Debug)]
 pub struct P2PConfig {
     pub party_id: u16,
@@ -139,6 +155,10 @@ pub enum CggmpBehaviourEvent {
     Identify(Box<identify::Event>),
 }
 
+/// Combined network behavior for the CGGMP protocol implementation
+///
+/// Aggregates multiple libp2p protocol behaviors including request-response,
+/// Kademlia DHT, and peer identification into a single network behavior.
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "CggmpBehaviourEvent")]
 #[behaviour(event_process = false)]
@@ -166,17 +186,15 @@ impl From<identify::Event> for CggmpBehaviourEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum P2PMessage {
-    Protocol(WireMessage),
-    Session(SessionMessage),
-}
-
+/// Codec implementation for CGGMP protocol message serialization
+///
+/// Handles the encoding and decoding of protocol messages for network transmission.
+/// Uses a default implementation suitable for the protocol's message format.
 #[derive(Clone, Default)]
 pub struct CggmpCodec;
 
 pub struct P2PNode {
-    swarm: Swarm<CggmpBehaviour>,
+    swarm: Arc<Mutex<Swarm<CggmpBehaviour>>>,
     local_session: PartySession,
     peers: Arc<RwLock<HashMap<PeerId, PartySession>>>,
     message_state: Arc<RwLock<MessageState>>,
@@ -229,7 +247,13 @@ impl P2PNode {
         }))
         .with_idle_connection_timeout(Duration::from_secs(60));
 
-        let mut swarm = Swarm::new(transport, behaviour, peer_id, swarm_config);
+        // Build the swarm
+        let mut swarm = Swarm::new(
+            transport,
+            behaviour,
+            peer_id,
+            swarm_config,
+        );
 
         // Listen on provided addresses
         for addr in config.listen_addresses {
@@ -239,7 +263,7 @@ impl P2PNode {
         }
 
         Ok(Self {
-            swarm,
+            swarm: Arc::new(Mutex::new(swarm)),
             local_session: PartySession {
                 party_id: config.party_id,
                 session_id: config.session_id,
@@ -249,6 +273,89 @@ impl P2PNode {
         })
     }
 
+    pub async fn delivery(&self) -> Result<impl round_based::Delivery<Message>, P2PError> {
+        // Create delivery channels
+        let (sender_tx, _sender_rx) = unbounded();
+        let (receiver_tx, receiver_rx) = unbounded();
+        
+        // Clone required data for the delivery handlers
+        let swarm = Arc::clone(&self.swarm);
+        let peers = Arc::clone(&self.peers);
+        let local_session = self.local_session.clone();
+
+        // Spawn message handling task
+        tokio::spawn(async move {
+            loop {
+                // Get swarm lock and poll for next event
+                if let Some(event) = {
+                    let mut swarm = swarm.lock().unwrap();
+                    swarm.next().now_or_never()
+                } {
+                    match event {
+                        Some(SwarmEvent::Behaviour(CggmpBehaviourEvent::RequestResponse(event))) => {
+                            match event {
+                                RequestResponseEvent::Message {
+                                    peer,
+                                    message: RequestMessage::Request {
+                                        request: P2PMessage::Protocol(wire_msg),
+                                        channel, ..
+                                    }, ..
+                                } => {
+                                    // Convert wire message to protocol message and forward
+                                    if let Ok(msg) = bincode::deserialize(&wire_msg.payload) {
+                                        let incoming = Incoming {
+                                            id: wire_msg.id,
+                                            sender: wire_msg.sender,
+                                            msg,
+                                            msg_type: if wire_msg.receiver.is_some() {
+                                                MessageType::P2P
+                                            } else {
+                                                MessageType::Broadcast
+                                            },
+                                        };
+
+                                        if let Err(e) = receiver_tx.unbounded_send(incoming) {
+                                            println!("Failed to forward message: {}", e);
+                                            break;
+                                        }
+                                    }
+
+                                    // Send empty response
+                                    let mut swarm = swarm.lock().unwrap();
+                                    if let Err(e) = swarm
+                                        .behaviour_mut()
+                                        .request_response
+                                        .send_response(channel, ())
+                                    {
+                                        println!("Failed to send response: {:?}", e);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        // Create and return the delivery mechanism
+        Ok(P2PDelivery::new(
+            sender_tx,
+            receiver_rx,
+            self.local_session.party_id,
+            self.local_session.session_id,
+        ))
+    }
+
+    /// Gets the next event from the P2P network
+    async fn next_event(&mut self) -> Option<SwarmEvent<CggmpBehaviourEvent>> {
+        let mut swarm = self.swarm.lock().unwrap();
+        swarm.next().await
+    }
+    
     async fn handle_protocol_message(&mut self, msg: &WireMessage) -> Result<(), P2PError> {
         // Get message state first
         let mut message_state = self.message_state.write().await;
@@ -294,7 +401,8 @@ impl P2PNode {
                 };
 
                 if should_disconnect {
-                    self.swarm
+                    let mut swarm = self.swarm.lock().unwrap();
+                    swarm
                         .disconnect_peer_id(peer)
                         .map_err(|e| P2PError::Swarm(format!("{:?}", e)))?;
                     println!("Unregistered peer {} with session {:?}", peer, session);
@@ -338,6 +446,7 @@ impl P2PNode {
                     } => {
                         // Handle the message first
                         match request {
+                            
                             P2PMessage::Protocol(wire_msg) => {
                                 // Handle protocol message
                                 self.handle_protocol_message(&wire_msg).await?;
@@ -349,7 +458,8 @@ impl P2PNode {
                         }
 
                         // Send empty response
-                        self.swarm
+                        let mut swarm = self.swarm.lock().unwrap();
+                        swarm
                             .behaviour_mut()
                             .request_response
                             .send_response(channel, ())
@@ -426,17 +536,28 @@ impl P2PNode {
     /// Runs the P2P node's event loop
     pub async fn run(&mut self) -> Result<(), P2PError> {
         loop {
-            tokio::select! {
-                event = self.swarm.select_next_some() => {
-                    self.handle_event(event).await?;
+            // First get the event
+            let event = {
+                let mut swarm = self.swarm.lock().unwrap();
+                match swarm.select_next_some().now_or_never() {
+                    Some(event) => event,
+                    None => {
+                        drop(swarm);
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
                 }
-            }
+            };
+
+            // Then handle the event
+            self.handle_event(event).await?;
         }
     }
 
     /// Sends a message to a specific peer
     pub async fn send_message(&mut self, peer_id: PeerId, msg: P2PMessage) -> Result<(), P2PError> {
-        self.swarm
+        let mut swarm = self.swarm.lock().unwrap();
+        swarm
             .behaviour_mut()
             .request_response
             .send_request(&peer_id, msg);
@@ -457,7 +578,8 @@ impl P2PNode {
 
         // Then send the message to each peer
         for (peer_id, _) in peers_to_send {
-            self.swarm
+            let mut swarm = self.swarm.lock().unwrap();
+            swarm
                 .behaviour_mut()
                 .request_response
                 .send_request(&peer_id, msg.clone());
@@ -487,7 +609,8 @@ impl Drop for P2PNode {
             .unwrap_or_default();
 
         for peer in peers {
-            let _ = self.swarm.disconnect_peer_id(peer);
+            let mut swarm = self.swarm.lock().unwrap();
+            let _ = swarm.disconnect_peer_id(peer);
         }
     }
 }

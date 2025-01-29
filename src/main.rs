@@ -62,6 +62,8 @@ mod service;
 mod signing;
 mod storage;
 mod p2p;
+mod p2p_delivery;
+mod ws_delivery;
 
 use std::time::Duration;
 use clap::Parser;

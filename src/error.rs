@@ -25,6 +25,7 @@
 //! }
 //! ```
 
+use crate::ws_delivery::DeliveryError;
 use crate::network;
 use crate::server::ServerError;
 use crate::storage;
@@ -76,6 +77,11 @@ pub enum Error {
     #[error("Network error: {0}")]
     Network(#[from] network::NetworkError),
 
+    /// Network communication errors, including connection failures,
+    /// message delivery issues, and WebSocket-related problems.
+    #[error("Network error: {0}")]
+    Delivery(#[from] network::DeliveryError),
+    
     /// Storage-related errors, including file I/O issues,
     /// encryption/decryption failures, and data persistence problems.
     #[error("Storage error: {0}")]
