@@ -25,8 +25,8 @@ pub enum MessageType {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct NetworkMessage {
-    data: Vec<u8>,
+struct NetworkMessage<T> {
+    data: T,
     msg_type: MessageType,
 }
 
@@ -113,7 +113,7 @@ where
 pub struct P2PNode {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
     keypair: Keypair,
-    sessions: Arc<RwLock<HashMap<TopicHash, Box<dyn SessionInfoTrait>>>>,
+    sessions: Arc<RwLock<HashMap<gossipsub::TopicHash, Box<dyn SessionInfoTrait>>>>,
     running: Arc<RwLock<bool>>,
     pub protocol: String,
 }
@@ -209,7 +209,7 @@ impl P2PNode {
                                           message,
                                       }) => {
                     // Deserialize the network message
-                    match bincode::deserialize::<NetworkMessage>(&message.data) {
+                    match bincode::deserialize::<NetworkMessage<Vec<u8>>>(&message.data) {
                         Ok(network_msg) => {
                             let sessions = node.sessions.read().await;
 
@@ -220,9 +220,7 @@ impl P2PNode {
                                         // Forward to all sessions with matching session_id
                                         for session in sessions.values() {
                                             if session.session_id() == session_id {
-                                                session.forward_message(
-                                                    network_msg.data.clone()
-                                                );
+                                                session.forward_message(network_msg.data.clone());
                                             }
                                         }
                                     }
@@ -230,9 +228,7 @@ impl P2PNode {
                                 MessageType::P2P => {
                                     // Forward only to the specific session matching the topic
                                     if let Some(session) = sessions.get(&message.topic) {
-                                        session.forward_message(
-                                            network_msg.data
-                                        );
+                                        session.forward_message(network_msg.data);
                                     }
                                 }
                             }
@@ -408,13 +404,9 @@ impl P2PNode {
     where
         M: Serialize + Send + 'static,
     {
-        // Serialize the original message
-        let serialized_data = bincode::serialize(data)
-            .map_err(|e| P2PError::Protocol(format!("Data serialization error: {}", e)))?;
-
-        // Create and serialize the network message
+        // Create the network message
         let network_msg = NetworkMessage {
-            data: serialized_data,
+            data,
             msg_type: match recipient {
                 None => MessageType::Broadcast,
                 Some(_) => MessageType::P2P,
