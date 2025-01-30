@@ -5,14 +5,13 @@
 //! maintaining API compatibility with the existing delivery interface.
 
 use crate::network::WireMessage;
-use futures::StreamExt;
-use libp2p::{swarm::SwarmEvent, yamux, Multiaddr, PeerId, Swarm};
-use libp2p_core::{transport::upgrade::Version, Transport};
+use libp2p::{Multiaddr, Swarm};
 use libp2p_gossipsub as gossipsub;
+use libp2p_gossipsub::{Behaviour, IdentTopic};
 use libp2p_identity::{self, Keypair};
-use round_based::{Incoming, MessageDestination};
+use round_based::Incoming;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc::UnboundedSender, Mutex, RwLock};
 
 /// Configuration for P2P network setup
@@ -39,14 +38,26 @@ pub enum P2PError {
 }
 
 /// Information about an active delivery session
-#[derive(Clone)]
 pub struct SessionInfo<M>
 where
-    M: Serialize + for<'de> Deserialize<'de> + Send + 'static,
+    M: Serialize + for<'de> Deserialize<'de> + Clone + Send + 'static,
 {
     pub party_id: u16,
     pub session_id: u16,
     pub sender: UnboundedSender<Incoming<M>>,
+}
+
+impl<M> Clone for SessionInfo<M>
+where
+    M: Serialize + for<'de> Deserialize<'de> + Clone + Send + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            party_id: self.party_id,
+            session_id: self.session_id,
+            sender: self.sender.clone(),
+        }
+    }
 }
 
 pub trait SessionInfoTrait: Send + Sync {
@@ -58,7 +69,7 @@ pub trait SessionInfoTrait: Send + Sync {
 // Implement the trait for SessionInfo
 impl<M> SessionInfoTrait for SessionInfo<M>
 where
-    M: Serialize + for<'de> Deserialize<'de> + Send + 'static,
+    M: Serialize + for<'de> Deserialize<'de> + Send + 'static + Clone,
 {
     fn party_id(&self) -> u16 {
         self.party_id
@@ -85,118 +96,36 @@ where
 }
 
 pub struct P2PNode {
-    swarm: Arc<Mutex<Swarm<gossipsub::Behaviour>>>,
+    swarm: Arc<Mutex<Swarm<Behaviour>>>,
     keypair: Keypair,
     sessions: Arc<RwLock<HashMap<gossipsub::TopicHash, Box<dyn SessionInfoTrait>>>>,
     running: Arc<RwLock<bool>>,
 }
 
+// p2p_node.rs
 impl P2PNode {
-    /// Creates or returns the singleton P2P node instance
-    pub async fn new(config: P2PConfig) -> Result<Arc<Self>, P2PError> {
-        // Create identity keypair
-        let keypair = Keypair::generate_ed25519();
-        let peer_id = PeerId::from(keypair.public());
-
-        // Create gossipsub configuration
-        let gossipsub_config = gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(Duration::from_secs(1))
-            .validation_mode(gossipsub::ValidationMode::Strict)
-            .build()
-            .map_err(|e| P2PError::Protocol(e.to_string()))?;
-
-        // Create gossipsub protocol
-        let behaviour = gossipsub::Behaviour::new(
-            gossipsub::MessageAuthenticity::Signed(keypair.clone()),
-            gossipsub_config,
-        )
-        .map_err(|e| P2PError::Protocol(e.to_string()))?;
-
-        // Create noise keys for encryption
-        let noise_config =
-            libp2p_noise::Config::new(&keypair).map_err(|e| P2PError::Protocol(e.to_string()))?;
-
-        // Create transport with noise encryption and multiplexing
-        let transport = libp2p_tcp::tokio::Transport::new(libp2p_tcp::Config::default())
-            .upgrade(Version::V1Lazy)
-            .authenticate(noise_config)
-            .multiplex(yamux::Config::default())
-            .boxed();
-
-        // Create swarm config with tokio executor
-        let swarm_config = libp2p_swarm::Config::with_executor(Box::new(|fut| {
-            tokio::spawn(fut);
-        }))
-        .with_idle_connection_timeout(Duration::from_secs(60));
-
-        // Build the swarm
-        let mut swarm = Swarm::new(transport, behaviour, peer_id, swarm_config);
-
-        // Listen on provided addresses
-        for addr in config.listen_addresses {
-            swarm
-                .listen_on(addr)
-                .map_err(|e| P2PError::Transport(e.to_string()))?;
-        }
-
-        // Connect to bootstrap peers
-        for addr in config.bootstrap_peers {
-            swarm
-                .dial(addr)
-                .map_err(|e| P2PError::Transport(e.to_string()))?;
-        }
-
-        // Build the node
-        let node = Arc::new(Self {
-            swarm: Arc::new(Mutex::new(swarm)),
-            keypair,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            running: Arc::new(RwLock::new(true)),
-        });
-
-        // Start the run loop in a separate task
-        let node_clone = Arc::clone(&node);
-        tokio::spawn(async move {
-            if let Err(e) = Self::run(node_clone).await {
-                println!("P2P node start error: {}", e);
-            }
-        });
-
-        Ok(node)
+    /// Creates a broadcast topic for a session
+    pub fn get_broadcast_topic(session_id: u16) -> IdentTopic {
+        IdentTopic::new(format!("cggmp21/broadcast/{}", session_id))
     }
 
-    /// Publishes a message to a topic
-    pub fn publish(
-        &self,
-        topic: &gossipsub::IdentTopic,
-        data: Vec<u8>,
-    ) -> Result<(), P2PError> {
-        if let Ok(mut swarm) = self.swarm.try_lock() {
-            swarm
-                .behaviour_mut()
-                .publish(topic.clone(), data)
-                .map(|_| ())
-                .map_err(|e| P2PError::Protocol(e.to_string()))
-        } else {
-            Err(P2PError::Protocol("Failed to acquire swarm lock".into()))
-        }
+    /// Creates a P2P topic for a specific party in a session
+    pub fn get_p2p_topic(party_id: u16, session_id: u16) -> IdentTopic {
+        IdentTopic::new(format!("cggmp21/p2p/{}/{}", session_id, party_id))
     }
 
-    /// Subscribes to a topic and registers a session
-    pub async fn subscribe_and_register<M>(
+    /// Subscribes to relevant topics for a party
+    pub(crate) async fn subscribe_to_session<M>(
         &self,
         party_id: u16,
         session_id: u16,
         sender: UnboundedSender<Incoming<M>>,
     ) -> Result<(), P2PError>
     where
-        M: Serialize + for<'de> Deserialize<'de> + Send + 'static,
+        M: Serialize + for<'de> Deserialize<'de> + Send + 'static + Clone,
     {
-        let topic = gossipsub::IdentTopic::new(format!(
-            "cggmp21/session/{}/{}",
-            session_id.clone(),
-            party_id
-        ));
+        let broadcast_topic = Self::get_broadcast_topic(session_id);
+        let p2p_topic = Self::get_p2p_topic(party_id, session_id);
 
         let session_info = SessionInfo {
             party_id,
@@ -204,73 +133,73 @@ impl P2PNode {
             sender,
         };
 
-        // Subscribe to topic
         if let Ok(mut swarm) = self.swarm.try_lock() {
+            // Subscribe to broadcast topic
             swarm
                 .behaviour_mut()
-                .subscribe(&topic)
+                .subscribe(&broadcast_topic)
+                .map_err(|e| P2PError::Protocol(e.to_string()))?;
+
+            // Subscribe to P2P topic
+            swarm
+                .behaviour_mut()
+                .subscribe(&p2p_topic)
                 .map_err(|e| P2PError::Protocol(e.to_string()))?;
         } else {
             return Err(P2PError::Protocol("Failed to acquire swarm lock".into()));
         }
 
-        // Register session
-        self.sessions
-            .write()
-            .await
-            .insert(topic.hash(), Box::new(session_info));
+        // Register session for both topics
+        let mut sessions = self.sessions.write().await;
+        sessions.insert(broadcast_topic.hash(), Box::new(session_info.clone()));
+        sessions.insert(p2p_topic.hash(), Box::new(session_info));
 
         Ok(())
     }
 
-    /// Creates a topic identifier for a given party and session
-    pub fn get_topic(party_id: u16, session_id: u16) -> gossipsub::IdentTopic {
-        gossipsub::IdentTopic::new(format!("cggmp21/session/{}/{}", session_id, party_id))
+    fn get_swarm_mut(&self) -> Result<tokio::sync::MutexGuard<'_, Swarm<Behaviour>>, P2PError> {
+        self.swarm
+            .try_lock()
+            .map_err(|e| P2PError::Protocol(format!("Failed to acquire swarm lock: {}", e)))
     }
 
-    /// Main event loop for P2P node operation
-    pub async fn run(self: Arc<Self>) -> Result<(), P2PError> {
-        loop {
-            // Lock the swarm for this iteration
-            let mut swarm = self.swarm.lock().await;
+    /// Publishes a message to the appropriate topic
+    pub(crate) fn publish_message<M>(
+        &self,
+        msg: &M,
+        recipient: Option<u16>,
+        session_id: u16,
+    ) -> Result<(), P2PError>
+    where
+        M: Serialize + Send + 'static,
+    {
+        let data = bincode::serialize(msg)
+            .map_err(|e| P2PError::Protocol(format!("Serialization error: {}", e)))?;
 
-            match swarm.select_next_some().await {
-                SwarmEvent::Behaviour(gossipsub::Event::Message { message, .. }) => {
-                    // Attempt to deserialize the message to check if it's a broadcast
-                    if let Ok(wire_msg) = bincode::deserialize::<WireMessage>(&message.data) {
-                        let sessions = self.sessions.read().await;
-
-                        if let Some(session) = sessions.get(&message.topic) {
-                            let msg_type = match wire_msg.to_message_destination() {
-                                None => round_based::MessageType::Broadcast,
-                                Some(MessageDestination::OneParty(_)) => {
-                                    round_based::MessageType::P2P
-                                }
-                                Some(MessageDestination::AllParties) => {
-                                    round_based::MessageType::Broadcast
-                                }
-                            };
-
-                            session.forward_message(wire_msg, msg_type);
-                        }
-                    } else {
-                        println!("Received malformed message");
-                    }
+        if let Ok(mut swarm) = self.swarm.try_lock() {
+            match recipient {
+                None => {
+                    // Broadcast message
+                    let topic = Self::get_broadcast_topic(session_id);
+                    swarm
+                        .behaviour_mut()
+                        .publish(topic, data)
+                        .map(|_| ())
+                        .map_err(|e| P2PError::Protocol(e.to_string()))?;
                 }
-                SwarmEvent::Behaviour(gossipsub::Event::Subscribed { peer_id, topic }) => {
-                    println!("Peer {} subscribed to topic {:?}", peer_id, topic);
+                Some(party_id) => {
+                    // P2P message
+                    let topic = Self::get_p2p_topic(party_id, session_id);
+                    swarm
+                        .behaviour_mut()
+                        .publish(topic, data)
+                        .map(|_| ())
+                        .map_err(|e| P2PError::Protocol(e.to_string()))?;
                 }
-                SwarmEvent::Behaviour(gossipsub::Event::Unsubscribed { peer_id, topic }) => {
-                    println!("Peer {} unsubscribed from topic {:?}", peer_id, topic);
-                }
-                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                    println!("Connected to peer: {}", peer_id);
-                }
-                SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                    println!("Disconnected from peer: {}", peer_id);
-                }
-                _ => {}
             }
+            Ok(())
+        } else {
+            Err(P2PError::Protocol("Failed to acquire swarm lock".into()))
         }
     }
 }

@@ -1,4 +1,3 @@
-use crate::network::WireMessage;
 use crate::p2p_node::{P2PError, P2PNode};
 use futures::{Sink, Stream};
 use round_based::{Delivery, Incoming, MessageDestination, Outgoing};
@@ -15,42 +14,55 @@ where
     M: Serialize + for<'de> Deserialize<'de> + Send + 'static,
 {
     node: Arc<P2PNode>,
-    session_id: u16,
     party_id: u16,
+    session_id: u16,
     receiver: UnboundedReceiver<Incoming<M>>,
     sender: UnboundedSender<Incoming<M>>,
 }
 
 impl<M> P2PDelivery<M>
 where
-    M: Serialize + for<'de> Deserialize<'de> + Send + 'static,
+    M: Serialize + for<'de> Deserialize<'de> + Send + 'static + Clone,
 {
-    pub async fn new<T>(node: &Arc<P2PNode>, party_id: u16, session_id: T) -> Result<Self, P2PError>
-    where
-        T: Into<u16> + Clone,
-    {
-        let node = Arc::clone(node);
+    pub async fn new(
+        node: &Arc<P2PNode>,
+        party_id: u16,
+        session_id: impl Into<u16>,
+    ) -> Result<Self, P2PError> {
+        let session_id = session_id.into();
         let (sender, receiver) = unbounded_channel();
 
-        // Subscribe and register session
-        node.subscribe_and_register(party_id, session_id.clone().into(), sender.clone())
-            .await?;
+        // Subscribe to both broadcast and P2P topics
+        node.subscribe_to_session(party_id, session_id, sender.clone()).await?;
 
         Ok(Self {
-            node,
-            session_id: session_id.into(),
+            node: Arc::clone(node),
             party_id,
+            session_id,
             receiver,
             sender,
         })
     }
 }
 
-impl<M> Unpin for P2PDelivery<M> where M: Serialize + for<'de> Deserialize<'de> + Send + 'static {}
+impl<M> Delivery<M> for P2PDelivery<M>
+where
+    M: Serialize + for<'de> Deserialize<'de> + Unpin + Send + 'static + Clone,
+{
+    type Send = Self;
+    type Receive = Self;
+    type SendError = P2PError;
+    type ReceiveError = P2PError;
 
+    fn split(self) -> (Self::Receive, Self::Send) {
+        (self.clone(), self)
+    }
+}
+
+// Implement Stream trait
 impl<M> Stream for P2PDelivery<M>
 where
-    M: Serialize + for<'de> Deserialize<'de> + Send + 'static,
+    M: Serialize + for<'de> Deserialize<'de> + Send + Clone + 'static,
 {
     type Item = Result<Incoming<M>, P2PError>;
 
@@ -63,42 +75,11 @@ where
     }
 }
 
-impl<M> Sink<Outgoing<M>> for P2PDelivery<M>
+// Implement Unpin to make Stream implementation simpler
+impl<M> Unpin for P2PDelivery<M>
 where
-    M: Serialize + for<'de> Deserialize<'de> + Send + 'static,
+    M: Serialize + for<'de> Deserialize<'de> + Send + Clone + 'static,
 {
-    type Error = P2PError;
-
-    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn start_send(self: Pin<&mut Self>, item: Outgoing<M>) -> Result<(), Self::Error> {
-        let wire_msg = WireMessage {
-            id: crate::network::MESSAGE_ID_GEN.next_id(),
-            sender: self.party_id,
-            receiver: match item.recipient {
-                MessageDestination::OneParty(id) => Some(id),
-                MessageDestination::AllParties => None,
-            },
-            payload: bincode::serialize(&item.msg)
-                .map_err(|e| P2PError::Protocol(format!("Serialization error: {}", e)))?,
-        };
-
-        let encoded = bincode::serialize(&wire_msg)
-            .map_err(|e| P2PError::Protocol(format!("Wire message serialization error: {}", e)))?;
-
-        let topic = P2PNode::get_topic(self.party_id, self.session_id);
-        self.node.publish(&topic, encoded)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
 }
 
 impl<M> Clone for P2PDelivery<M>
@@ -117,16 +98,30 @@ where
     }
 }
 
-impl<M> Delivery<M> for P2PDelivery<M>
+impl<M> Sink<Outgoing<M>> for P2PDelivery<M>
 where
-    M: Serialize + for<'de> Deserialize<'de> + Unpin + Send + 'static,
+    M: Serialize + for<'de> Deserialize<'de> + Send + 'static,
 {
-    type Send = Self;
-    type Receive = Self;
-    type SendError = P2PError;
-    type ReceiveError = P2PError;
+    type Error = P2PError;
 
-    fn split(self) -> (Self::Receive, Self::Send) {
-        (self.clone(), self)
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: Outgoing<M>) -> Result<(), Self::Error> {
+        let recipient = match item.recipient {
+            MessageDestination::OneParty(id) => Some(id),
+            MessageDestination::AllParties => None,
+        };
+
+        self.node.publish_message(&item.msg, recipient, self.session_id)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
     }
 }
