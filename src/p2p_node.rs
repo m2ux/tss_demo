@@ -12,11 +12,23 @@ use libp2p_gossipsub as gossipsub;
 use libp2p_gossipsub::{Behaviour, IdentTopic, TopicHash};
 use libp2p_identity::{self, Keypair, PeerId};
 use libp2p_swarm::SwarmEvent;
-use round_based::Incoming;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc::UnboundedSender, Mutex, RwLock};
+
+/// Message type (broadcast or p2p)
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]
+pub enum MessageType {
+    Broadcast,
+    P2P,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct NetworkMessage {
+    data: Vec<u8>,
+    msg_type: MessageType,
+}
 
 /// Configuration for P2P network setup
 #[derive(Clone, Debug)]
@@ -49,7 +61,7 @@ where
 {
     pub party_id: u16,
     pub session_id: u16,
-    pub sender: UnboundedSender<Incoming<M>>,
+    pub sender: UnboundedSender<M>,
 }
 
 impl<M> Clone for SessionInfo<M>
@@ -68,7 +80,7 @@ where
 pub trait SessionInfoTrait: Send + Sync {
     fn party_id(&self) -> u16;
     fn session_id(&self) -> u16;
-    fn forward_message(&self, wire_msg: Vec<u8>, msg_type: round_based::MessageType);
+    fn forward_message(&self, data: Vec<u8>);
 }
 
 // Implement the trait for SessionInfo
@@ -84,17 +96,10 @@ where
         self.session_id
     }
 
-    fn forward_message(&self, data: Vec<u8>, msg_type: round_based::MessageType) {
+    fn forward_message(&self, data: Vec<u8>) {
         match bincode::deserialize::<M>(&data) {
             Ok(msg) => {
-                let incoming = Incoming {
-                    id: crate::network::MESSAGE_ID_GEN.next_id(),
-                    sender: self.party_id,
-                    msg,
-                    msg_type,
-                };
-
-                if let Err(e) = self.sender.send(incoming) {
+                if let Err(e) = self.sender.send(msg) {
                     println!("Failed to forward message: {}", e);
                 }
             }
@@ -108,7 +113,7 @@ where
 pub struct P2PNode {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
     keypair: Keypair,
-    sessions: Arc<RwLock<HashMap<gossipsub::TopicHash, Box<dyn SessionInfoTrait>>>>,
+    sessions: Arc<RwLock<HashMap<TopicHash, Box<dyn SessionInfoTrait>>>>,
     running: Arc<RwLock<bool>>,
     pub protocol: String,
 }
@@ -199,21 +204,42 @@ impl P2PNode {
 
             match swarm.select_next_some().await {
                 SwarmEvent::Behaviour(gossipsub::Event::Message {
-                    propagation_source: _,
-                    message_id: _,
-                    message,
-                }) => {
-                    let sessions = node.sessions.read().await;
-                    if let Some(session) = sessions.get(&message.topic) {
-                        // Determine message type based on topic pattern
-                        let msg_type = if node.is_broadcast_topic(&message.topic) {
-                            round_based::MessageType::Broadcast
-                        } else {
-                            round_based::MessageType::P2P
-                        };
+                                          propagation_source: _,
+                                          message_id: _,
+                                          message,
+                                      }) => {
+                    // Deserialize the network message
+                    match bincode::deserialize::<NetworkMessage>(&message.data) {
+                        Ok(network_msg) => {
+                            let sessions = node.sessions.read().await;
 
-                        // Forward the raw message data to the appropriate session
-                        session.forward_message(message.data, msg_type);
+                            match network_msg.msg_type {
+                                MessageType::Broadcast => {
+                                    // Extract session_id from topic
+                                    if let Some(session_id) = node.extract_session_id(&message.topic) {
+                                        // Forward to all sessions with matching session_id
+                                        for session in sessions.values() {
+                                            if session.session_id() == session_id {
+                                                session.forward_message(
+                                                    network_msg.data.clone()
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                MessageType::P2P => {
+                                    // Forward only to the specific session matching the topic
+                                    if let Some(session) = sessions.get(&message.topic) {
+                                        session.forward_message(
+                                            network_msg.data
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("Failed to deserialize network message: {}", e);
+                        }
                     }
                 }
                 SwarmEvent::Behaviour(gossipsub::Event::Subscribed { peer_id, topic }) => {
@@ -299,7 +325,7 @@ impl P2PNode {
         &self,
         party_id: u16,
         session_id: u16,
-        sender: UnboundedSender<Incoming<M>>,
+        sender: UnboundedSender<M>,
     ) -> Result<(), P2PError>
     where
         M: Serialize + for<'de> Deserialize<'de> + Send + 'static + Clone,
@@ -358,18 +384,45 @@ impl P2PNode {
         Self::new(config).await
     }
 
+    // Add helper method to extract session_id from topic
+    fn extract_session_id(&self, topic_hash: &TopicHash) -> Option<u16> {
+        // Convert topic hash to string and parse session_id
+        let topic_str = topic_hash.to_string();
+        let parts: Vec<&str> = topic_str.split('/').collect();
+
+        // Expected format: "{protocol}/broadcast/{session_id}"
+        if parts.len() == 3 && parts[1] == "broadcast" {
+            parts[2].parse::<u16>().ok()
+        } else {
+            None
+        }
+    }
+
     /// Publishes a message to the appropriate topic
     pub(crate) fn publish_message<M>(
         &self,
-        msg: &M,
+        data: &M,
         recipient: Option<u16>,
         session_id: u16,
     ) -> Result<(), P2PError>
     where
         M: Serialize + Send + 'static,
     {
-        let data = bincode::serialize(msg)
-            .map_err(|e| P2PError::Protocol(format!("Serialization error: {}", e)))?;
+        // Serialize the original message
+        let serialized_data = bincode::serialize(data)
+            .map_err(|e| P2PError::Protocol(format!("Data serialization error: {}", e)))?;
+
+        // Create and serialize the network message
+        let network_msg = NetworkMessage {
+            data: serialized_data,
+            msg_type: match recipient {
+                None => MessageType::Broadcast,
+                Some(_) => MessageType::P2P,
+            },
+        };
+
+        let msg_data = bincode::serialize(&network_msg)
+            .map_err(|e| P2PError::Protocol(format!("Network message serialization error: {}", e)))?;
 
         if let Ok(mut swarm) = self.swarm.try_lock() {
             match recipient {
@@ -378,7 +431,7 @@ impl P2PNode {
                     let topic = self.get_broadcast_topic(session_id);
                     swarm
                         .behaviour_mut()
-                        .publish(topic, data)
+                        .publish(topic, msg_data)
                         .map(|_| ())
                         .map_err(|e| P2PError::Protocol(e.to_string()))?;
                 }
@@ -387,7 +440,7 @@ impl P2PNode {
                     let topic = self.get_p2p_topic(party_id, session_id);
                     swarm
                         .behaviour_mut()
-                        .publish(topic, data)
+                        .publish(topic, msg_data)
                         .map(|_| ())
                         .map_err(|e| P2PError::Protocol(e.to_string()))?;
                 }
