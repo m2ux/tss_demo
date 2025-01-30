@@ -45,7 +45,7 @@ use std::time::Duration;
 ///
 /// Generates monotonically increasing message IDs with proper handling of integer overflow
 /// using wrapping arithmetic. Thread-safe through the use of atomic operations.
-struct MessageIdGenerator {
+pub struct MessageIdGenerator {
     counter: AtomicU64,
 }
 
@@ -271,7 +271,7 @@ pub struct WireMessage {
 
 impl WireMessage {
     /// Converts wire format receiver to MessageDestination.
-    fn to_message_destination(&self) -> Option<MessageDestination> {
+    pub(crate) fn to_message_destination(&self) -> Option<MessageDestination> {
         self.receiver.map(MessageDestination::OneParty)
     }
 
