@@ -2,7 +2,7 @@ use crate::message::{
     MessageIdGenerator, NetworkMessage, PartySession, RoundBasedWireMessage, SessionMessage,
     WireMessage,
 };
-use futures::channel::{mpsc, mpsc::unbounded};
+use tokio::sync::{mpsc,mpsc::unbounded_channel};
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use round_based::{Delivery, Incoming, Outgoing};
 use serde::{Deserialize, Serialize};
@@ -80,7 +80,7 @@ where
         };
 
         self.sender
-            .unbounded_send(NetworkMessage::SessionMessage(reg_msg))
+            .send(NetworkMessage::SessionMessage(reg_msg))
             .map_err(|_| NetworkError::ChannelClosed)?;
 
         Ok(())
@@ -105,7 +105,7 @@ where
 
         let _ = self
             .sender
-            .unbounded_send(NetworkMessage::SessionMessage(unreg_msg));
+            .send(NetworkMessage::SessionMessage(unreg_msg));
         std::thread::sleep(Duration::from_secs(1));
     }
 }
@@ -125,7 +125,7 @@ where
 
     fn start_send(self: Pin<&mut Self>, item: Outgoing<M>) -> Result<(), Self::Error> {
         self.sender
-            .unbounded_send(NetworkMessage::WireMessage(
+            .send(NetworkMessage::WireMessage(
                 <WireMessage as RoundBasedWireMessage<M>>::new_p2p(
                     &MESSAGE_ID_GEN,
                     self.party_id,
@@ -173,7 +173,7 @@ where
 
     fn start_send(self: Pin<&mut Self>, wire_msg: WireMessage) -> Result<(), Self::Error> {
         self.sender
-            .unbounded_send(NetworkMessage::WireMessage(wire_msg))
+            .send(NetworkMessage::WireMessage(wire_msg))
             .map_err(|_| NetworkError::ChannelClosed)
     }
 
@@ -266,7 +266,7 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         // Poll the underlying receiver
-        let poll_result = Pin::new(&mut self.receiver).poll_next(cx);
+        let poll_result = Pin::new(&mut self.receiver).poll_recv(cx);
 
         match poll_result {
             std::task::Poll::Ready(Some(NetworkMessage::WireMessage(wire_msg))) => {
@@ -352,8 +352,8 @@ where
     ) -> Result<Self, NetworkError> {
         let (write, read) = stream.split();
 
-        let (stream_rcvr_tx, stream_rcvr_rx) = unbounded::<NetworkMessage>();
-        let (stream_sender_tx, mut stream_sender_rx) = unbounded::<NetworkMessage>();
+        let (stream_rcvr_tx, stream_rcvr_rx) = unbounded_channel::<NetworkMessage>();
+        let (stream_sender_tx, mut stream_sender_rx) = unbounded_channel::<NetworkMessage>();
 
         // Spawn background task to handle stream communication
         tokio::spawn(async move {
@@ -366,7 +366,7 @@ where
                     msg = read.next() => {
                         match msg {
                             Some(Ok(data)) => {
-                                if stream_rcvr_tx.unbounded_send(data).is_err() {
+                                if stream_rcvr_tx.send(data).is_err() {
                                     break;
                                 }
                             }
@@ -379,7 +379,7 @@ where
                         }
                     }
                     // Handle outgoing messages
-                    msg = stream_sender_rx.next() => {
+                    msg = stream_sender_rx.recv() => {
                         match msg {
                             Some(data) => {
                                 if let Err(_) = write.send(data).await {

@@ -15,7 +15,7 @@ use libp2p_swarm::SwarmEvent;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{mpsc::UnboundedSender, Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 /// Message type (broadcast or p2p)
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]
@@ -25,9 +25,9 @@ pub enum MessageType {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct NetworkMessage {
-    data: Vec<u8>,
-    msg_type: MessageType,
+pub struct P2PMessage {
+    pub(crate) data: Vec<u8>,
+    pub(crate) msg_type: MessageType,
 }
 
 /// Configuration for P2P network setup
@@ -59,13 +59,13 @@ pub struct SessionInfo
 {
     pub party_id: u16,
     pub session_id: u16,
-    pub sender: UnboundedSender<NetworkMessage>,
+    pub sender: mpsc::UnboundedSender<P2PMessage>,
 }
 
 // Implement the trait for SessionInfo
 impl SessionInfo
 {
-    fn forward_message(&self, msg: NetworkMessage) {
+    fn forward_message(&self, msg: P2PMessage) {
         match bincode::deserialize::<Vec<u8>>(&msg.data) {
             Ok(_) => {
                 if let Err(e) = self.sender.send(msg) {
@@ -274,7 +274,7 @@ impl P2PNode {
             // Broadcast message - forward to all sessions with matching session_id
             if let Some(session_id) = topic.session_id() {
                 // Create broadcast network message
-                let network_msg = NetworkMessage {
+                let network_msg = P2PMessage {
                     data: data.clone(),
                     msg_type: MessageType::Broadcast,
                 };
@@ -290,7 +290,7 @@ impl P2PNode {
             // P2P message - forward only to the specific session matching the topic
             if let Some(session) = sessions.get(&topic.hash()) {
                 // Create P2P network message
-                let network_msg = NetworkMessage {
+                let network_msg = P2PMessage {
                     data,
                     msg_type: MessageType::P2P,
                 };
@@ -318,7 +318,7 @@ impl P2PNode {
         &self,
         party_id: u16,
         session_id: u16,
-        sender: UnboundedSender<NetworkMessage>,
+        sender: mpsc::UnboundedSender<P2PMessage>,
     ) -> Result<(), P2PError>
     {
         // Create topics using the new Topic struct
@@ -404,7 +404,7 @@ impl P2PNode {
 
         Ok(())
     }
-    
+
     pub fn publish_message<M>(
         &self,
         data: &M,
