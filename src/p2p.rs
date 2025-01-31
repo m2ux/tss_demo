@@ -1,8 +1,7 @@
 use crate::message::{NetworkMessage, WireMessage};
 use crate::network::{NetworkError, StreamDelivery};
-use crate::p2p_node::{MessageType, P2PNode};
-use futures::{Sink, Stream, StreamExt};
-use futures_util::SinkExt;
+use crate::p2p_node::P2PNode;
+use futures::{Sink, Stream};
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -19,8 +18,8 @@ pub enum P2PStreamError {
     Node(#[from] crate::p2p_node::P2PError),
 }
 
-/// A wrapper around P2P communication that implements Stream + Sink for Vec<u8>
-pub struct P2PBinaryStream {
+/// A P2P message stream implementing Stream + Sink for NetworkMessage
+pub struct P2PMessageStream {
     node: Arc<P2PNode>,
     to_network_receiver: mpsc::UnboundedReceiver<NetworkMessage>,
     from_node_sender: mpsc::UnboundedSender<Vec<u8>>,
@@ -28,7 +27,7 @@ pub struct P2PBinaryStream {
     session_id: u16,
 }
 
-impl P2PBinaryStream {
+impl P2PMessageStream {
     /// Creates a new P2P stream connection
     pub async fn new(
         node: Arc<P2PNode>,
@@ -43,7 +42,7 @@ impl P2PBinaryStream {
             .await
             .map_err(P2PStreamError::Node)?;
 
-        // Spawn task to convert P2PMessage to NetworkMessage
+        // Spawn task to convert received messages to NetworkMessage
         tokio::spawn({
             let to_network_sender = to_network_sender.clone();
             async move {
@@ -67,7 +66,7 @@ impl P2PBinaryStream {
     }
 }
 
-impl Stream for P2PBinaryStream {
+impl Stream for P2PMessageStream {
     type Item = Result<NetworkMessage, P2PStreamError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -78,7 +77,7 @@ impl Stream for P2PBinaryStream {
     }
 }
 
-impl Sink<NetworkMessage> for P2PBinaryStream {
+impl Sink<NetworkMessage> for P2PMessageStream {
     type Error = P2PStreamError;
 
     fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -108,7 +107,7 @@ impl Sink<NetworkMessage> for P2PBinaryStream {
     }
 }
 
-impl Drop for P2PBinaryStream {
+impl Drop for P2PMessageStream {
     fn drop(&mut self) {
         // Try to unsubscribe when stream is dropped
         let node = self.node.clone();
@@ -121,58 +120,8 @@ impl Drop for P2PBinaryStream {
     }
 }
 
-/// Wrapper around P2PBinaryStream that handles NetworkMessage conversion
-pub struct MessageStream {
-    inner: P2PBinaryStream,
-}
-
-impl MessageStream {
-    pub async fn new(
-        node: Arc<P2PNode>,
-        party_id: u16,
-        session_id: u16,
-    ) -> Result<Self, P2PStreamError> {
-        Ok(Self {
-            inner: P2PBinaryStream::new(node, party_id, session_id).await?,
-        })
-    }
-}
-
-impl Stream for MessageStream {
-    type Item = Result<NetworkMessage, P2PStreamError>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.inner.poll_next_unpin(cx) {
-            Poll::Ready(Some(Ok(msg))) => Poll::Ready(Some(Ok(msg))),
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl Sink<NetworkMessage> for MessageStream {
-    type Error = P2PStreamError;
-
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready_unpin(cx)
-    }
-
-    fn start_send(mut self: Pin<&mut Self>, msg: NetworkMessage) -> Result<(), Self::Error> {
-        self.inner.start_send_unpin(msg)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_flush_unpin(cx)
-    }
-
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_close_unpin(cx)
-    }
-}
-
 /// Type alias for StreamDelivery using P2P transport
-pub type P2PDelivery<M> = StreamDelivery<M, MessageStream, P2PStreamError>;
+pub type P2PDelivery<M> = StreamDelivery<M, P2PMessageStream, P2PStreamError>;
 
 impl<M> P2PDelivery<M>
 where
@@ -185,12 +134,12 @@ where
     ) -> Result<Self, NetworkError> {
         let session = session.into();
         StreamDelivery::new(
-            MessageStream::new(node, party_id, session)
+            P2PMessageStream::new(node, party_id, session)
                 .await
                 .map_err(|e| NetworkError::Connection(e.to_string()))?,
             party_id,
             session,
         )
-        .await
+            .await
     }
 }
