@@ -1,5 +1,3 @@
-// In websocket.rs
-
 use crate::error::Error;
 use crate::message::NetworkMessage;
 use crate::network::StreamDelivery;
@@ -75,7 +73,6 @@ impl Stream for WebSocketBinaryStream {
     }
 }
 
-// Implement Sink trait directly
 impl Sink<Vec<u8>> for WebSocketBinaryStream {
     type Error = tokio_tungstenite::tungstenite::Error;
 
@@ -155,10 +152,8 @@ impl Sink<NetworkMessage> for MessageStream {
     }
 }
 
-// Update the WsDelivery type alias to use MessageStream
 pub type WsDelivery<M> = StreamDelivery<M, MessageStream, tokio_tungstenite::tungstenite::Error>;
 
-// Update the connect method
 impl<M> WsDelivery<M>
 where
     M: Serialize + for<'de> Deserialize<'de> + Unpin + Send + 'static,
