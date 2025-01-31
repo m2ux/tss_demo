@@ -1,52 +1,15 @@
-//! WebSocket-based network communication layer for distributed protocols.
-//!
-//! This module provides a WebSocket-based implementation of the `round_based::Delivery` trait,
-//! enabling reliable message delivery for distributed protocols. It handles message ordering,
-//! peer-to-peer and broadcast communications, and proper error handling.
-//!
-//! # Features
-//!
-//! * Thread-safe message ID generation
-//! * Reliable message ordering with overflow handling
-//! * Support for both P2P and broadcast messages
-//! * Async/await based communication
-//! * Proper error handling and message validation
-//!
-//! # Examples
-//!
-//! ```rust,no_run
-//! use round_based::Delivery;
-//!
-//! async fn example() -> Result<(), NetworkError> {
-//!     // Connect to the WebSocket server
-//!     let delivery = WsDelivery::connect("ws://localhost:8080", 1).await?;
-//!
-//!     // Split into sender and receiver
-//!     let (receiver, sender) = delivery.split();
-//!
-//!     // Use sender and receiver for protocol communication
-//!     Ok(())
-//! }
-//! ```
-
 use crate::message::{
-    MessageIdGenerator, NetworkMessage, PartySession, SessionMessage, WireMessage,
+    MessageIdGenerator, NetworkMessage, PartySession, RoundBasedWireMessage, SessionMessage,
+    WireMessage,
 };
 use futures::channel::{mpsc, mpsc::unbounded};
 use futures::{Sink, SinkExt, Stream, StreamExt};
-use round_based::{Delivery, Incoming, MessageDestination, Outgoing};
+use round_based::{Delivery, Incoming, Outgoing};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use std::{marker::PhantomData, pin::Pin};
 
 pub static MESSAGE_ID_GEN: MessageIdGenerator = MessageIdGenerator::new();
-
-/// Message sent by client to register with server
-#[derive(Serialize, Deserialize, Debug)]
-pub enum ClientRegistration {
-    /// Initial registration message with party ID
-    Register { party_id: u16 },
-}
 
 /// Errors that can occur during network operations.
 #[derive(Debug, thiserror::Error)]
@@ -70,7 +33,7 @@ pub enum NetworkError {
 
 /// Message sender component.
 ///
-/// Handles sending messages to other parties through the connection.
+/// Handles sending network messages to other parties through the connection.
 /// Implements the `Sink` trait for outgoing messages.
 #[derive(Clone)]
 pub struct Sender<M>
@@ -87,28 +50,27 @@ impl<M> Sender<M>
 where
     M: Serialize + for<'de> Deserialize<'de> + Unpin,
 {
-    /// Sends a protocol message using the Sink trait
+    /// Broadcasts a message using the Sink trait
     pub async fn broadcast(&mut self, msg: M) -> Result<(), NetworkError> {
-        let outgoing = Outgoing {
+        self.send(WireMessage::new_broadcast(
+            &MESSAGE_ID_GEN,
+            self.party_id,
             msg,
-            recipient: MessageDestination::AllParties,
-        };
-
-        // Use the Sink trait's send method
-        self.send(outgoing).await
+        )?)
+        .await
     }
 
-    /// Sends a protocol message using the Sink trait
+    /// Sends a message to a peer using the Sink trait
     pub async fn send_to(&mut self, msg: M, party_id: u16) -> Result<(), NetworkError> {
-        let outgoing = Outgoing {
+        self.send(WireMessage::new_p2p(
+            &MESSAGE_ID_GEN,
+            self.party_id,
+            party_id,
             msg,
-            recipient: MessageDestination::OneParty(party_id),
-        };
-
-        // Use the Sink trait's send method
-        self.send(outgoing).await
+        )?)
+        .await
     }
-    /// Registers this party with the ws server
+    /// Registers this party with the session
     pub async fn register(&self) -> Result<(), NetworkError> {
         let reg_msg = SessionMessage::Register {
             session: PartySession {
@@ -148,55 +110,12 @@ where
     }
 }
 
-/// Implements the Sink trait for WebSocket message sending.
-///
-/// This implementation provides an asynchronous message sending interface that:
-/// - Generates unique message IDs for each outgoing message
-/// - Serializes messages into the wire format
-/// - Handles both P2P and broadcast message delivery
-/// - Uses an unbounded channel for message queuing
-///
-/// # Type Parameters
-///
-/// * `M` - The message type that must be serializable and deserializable
-///
-/// # Examples
-///
-/// ```rust,no_run
-/// use round_based::{Delivery, MessageDestination};
-///
-/// async fn send_message(sender: WsSender<String>) -> Result<(), NetworkError> {
-///     let message = round_based::Outgoing {
-///         recipient: MessageDestination::AllParties,
-///         msg: "Hello, everyone!".to_string(),
-///     };
-///
-///     sender.send(message).await?;
-///     Ok(())
-/// }
-/// ```
-///
-/// # Implementation Notes
-///
-/// - Messages are sent immediately through an unbounded channel
-/// - No internal buffering is performed
-/// - Message ordering is maintained through unique, monotonic IDs
-/// - The implementation is thread-safe and can be used across async tasks
 impl<M> Sink<Outgoing<M>> for Sender<M>
 where
     M: serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
     type Error = NetworkError;
 
-    /// Checks if the sink is ready to accept a new message.
-    ///
-    /// This implementation always returns `Ready(Ok(()))` as the underlying
-    /// unbounded channel can always accept new messages.
-    ///
-    /// # Returns
-    ///
-    /// - `Poll::Ready(Ok(()))`: The sink is ready to accept a new message
-    /// - Never returns `Poll::Pending` or `Err` in this implementation
     fn poll_ready(
         self: Pin<&mut Self>,
         _: &mut std::task::Context<'_>,
@@ -204,44 +123,18 @@ where
         std::task::Poll::Ready(Ok(()))
     }
 
-    /// Initiates sending a message through the WebSocket connection.
-    ///
-    /// This method performs the following steps:
-    /// 1. Creates a wire message with a unique ID and serialized payload
-    /// 2. Serializes the entire wire message
-    /// 3. Sends the serialized data through the channel
-    ///
-    /// # Arguments
-    ///
-    /// * `item` - The outgoing message to send, containing the payload and recipient information
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(())`: Message was successfully queued for sending
-    /// - `Err(NetworkError::Connection)`: Serialization of message failed
-    /// - `Err(NetworkError::ChannelClosed)`: The sending channel has been closed
     fn start_send(self: Pin<&mut Self>, item: Outgoing<M>) -> Result<(), Self::Error> {
-        let wire_msg = WireMessage {
-            id: MESSAGE_ID_GEN.next_id(),
-            sender: self.party_id,
-            receiver: WireMessage::from_message_destination(Some(item.recipient)),
-            payload: bincode::serialize(&item.msg)
-                .map_err(|_| NetworkError::Connection("Serialization failed".into()))?,
-        };
-
         self.sender
-            .unbounded_send(NetworkMessage::WireMessage(wire_msg))
+            .unbounded_send(NetworkMessage::WireMessage(
+                <WireMessage as RoundBasedWireMessage<M>>::new_p2p(
+                    &MESSAGE_ID_GEN,
+                    self.party_id,
+                    item,
+                )?,
+            ))
             .map_err(|_| NetworkError::ChannelClosed)
     }
 
-    /// Attempts to flush the sink, ensuring all queued messages are sent.
-    ///
-    /// In this implementation, flushing is a no-op as messages are sent
-    /// immediately through the unbounded channel.
-    ///
-    /// # Returns
-    ///
-    /// Always returns `Poll::Ready(Ok(()))` as there is no buffering
     fn poll_flush(
         self: Pin<&mut Self>,
         _: &mut std::task::Context<'_>,
@@ -257,6 +150,40 @@ where
     /// # Returns
     ///
     /// Always returns `Poll::Ready(Ok(()))` as there is no specific close operation
+    fn poll_close(
+        self: Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl<M> Sink<WireMessage> for Sender<M>
+where
+    M: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    type Error = NetworkError;
+
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, wire_msg: WireMessage) -> Result<(), Self::Error> {
+        self.sender
+            .unbounded_send(NetworkMessage::WireMessage(wire_msg))
+            .map_err(|_| NetworkError::ChannelClosed)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
     fn poll_close(
         self: Pin<&mut Self>,
         _: &mut std::task::Context<'_>,

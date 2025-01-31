@@ -65,10 +65,9 @@
 //! * Message serialization errors
 //! * Client registration conflicts
 
-use crate::message::{MessageState, WireMessage, PartySession, SessionMessage};
+use crate::message::{MessageState, NetworkMessage, PartySession, SessionMessage, WireMessage};
 use futures::channel::{mpsc, mpsc::unbounded};
 use futures::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -267,28 +266,38 @@ impl WsServer {
             match ws_receiver.next().await {
                 Some(Ok(msg)) => {
                     if let Message::Binary(data) = msg {
-                        match bincode::deserialize::<SessionMessage>(&data) {
-                            Ok(SessionMessage::Register { session }) => {
-                                // Handle registration
-                                let mut clients_lock = clients.write().await;
-                                if clients_lock.contains_key(&session) {
-                                    return Err(ServerError::Registration(format!(
-                                        "[S{}] Party {} already registered",
-                                        &session.session_id, &session.party_id
-                                    )));
+                        // Try to deserialize as NetworkMessage first
+                        match bincode::deserialize::<NetworkMessage>(&data) {
+                            Ok(NetworkMessage::SessionMessage(session_msg)) => {
+                                match session_msg {
+                                    SessionMessage::Register { session } => {
+                                        // Handle registration
+                                        let mut clients_lock = clients.write().await;
+                                        if clients_lock.contains_key(&session) {
+                                            return Err(ServerError::Registration(format!(
+                                                "[S{}] Party {} already registered",
+                                                &session.session_id, &session.party_id
+                                            )));
+                                        }
+
+                                        clients_lock
+                                            .insert(session.clone(), ClientSession { sender: tx });
+
+                                        println!(
+                                            "[S{}] Registered party {}",
+                                            &session.session_id, session.party_id
+                                        );
+                                        break session;
+                                    }
+                                    SessionMessage::Unregister { session } => {
+                                        let _ = Self::unregister_client(&session, &clients).await;
+                                        return Ok(());
+                                    }
                                 }
-
-                                clients_lock.insert(session.clone(), ClientSession { sender: tx });
-
-                                println!(
-                                    "[S{}] Registered party {}",
-                                    &session.session_id, session.party_id
-                                );
-                                break session;
                             }
-                            Ok(SessionMessage::Unregister { session }) => {
-                                let _ = Self::unregister_client(&session, &clients).await;
-                                return Ok(());
+                            Ok(NetworkMessage::WireMessage(_)) => {
+                                println!("Premature wire message");
+                                continue;
                             }
                             Err(e) => {
                                 println!("Failed to deserialize message from {}: {}", addr, e);
@@ -312,9 +321,7 @@ impl WsServer {
             let party_session = party_session.clone();
             async move {
                 while let Some(Ok(msg)) = ws_receiver.next().await {
-
                     if let Message::Binary(data) = msg {
-
                         // Try to deserialize as WireMessage (Protocol Message)
                         if let Ok(wire_msg) = bincode::deserialize::<WireMessage>(&data) {
                             Self::handle_client_message(

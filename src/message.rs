@@ -1,8 +1,8 @@
+use crate::network::NetworkError;
+use round_based::{MessageDestination, Outgoing};
+use serde::{Deserialize, Serialize};
 use std::num::Wrapping;
 use std::sync::atomic::{AtomicU64, Ordering};
-use round_based::MessageDestination;
-use serde::{Deserialize, Serialize};
-use crate::network::NetworkError;
 
 /// Internal message format for wire transmission.
 ///
@@ -20,16 +20,89 @@ pub struct WireMessage {
 }
 
 impl WireMessage {
+    pub fn new_broadcast<M: Serialize>(
+        msg_id_gen: &MessageIdGenerator,
+        sender: u16,
+        msg: M,
+    ) -> Result<Self, NetworkError> {
+        Ok(WireMessage {
+            id: msg_id_gen.next_id(),
+            sender,
+            receiver: None,
+            payload: bincode::serialize(&msg)
+                .map_err(|_| NetworkError::Connection("Payload serialization failed".into()))?,
+        })
+    }
+    pub fn new_p2p<M: Serialize>(
+        msg_id_gen: &MessageIdGenerator,
+        sender: u16,
+        receiver: u16,
+        msg: M,
+    ) -> Result<Self, NetworkError> {
+        Ok(WireMessage {
+            id: msg_id_gen.next_id(),
+            sender,
+            receiver: Some(receiver),
+            payload: bincode::serialize(&msg)
+                .map_err(|_| NetworkError::Connection("Payload serialization failed".into()))?,
+        })
+    }
+}
+
+pub trait RoundBasedWireMessage<M>: Sized {
+    fn to_message_destination(&self) -> Option<MessageDestination>;
+    fn from_message_destination(dest: Option<MessageDestination>) -> Option<u16>;
+    fn new_broadcast(
+        msg_id_gen: &MessageIdGenerator,
+        sender: u16,
+        item: Outgoing<M>,
+    ) -> Result<Self, NetworkError>;
+    fn new_p2p(
+        msg_id_gen: &MessageIdGenerator,
+        sender: u16,
+        item: Outgoing<M>,
+    ) -> Result<Self, NetworkError>;
+}
+
+impl<M: Serialize> RoundBasedWireMessage<M> for WireMessage {
     /// Converts wire format receiver to MessageDestination.
-    pub(crate) fn to_message_destination(&self) -> Option<MessageDestination> {
+    fn to_message_destination(&self) -> Option<MessageDestination> {
         self.receiver.map(MessageDestination::OneParty)
     }
 
     /// Converts MessageDestination to wire format receiver.
-    pub(crate) fn from_message_destination(dest: Option<MessageDestination>) -> Option<u16> {
+    fn from_message_destination(dest: Option<MessageDestination>) -> Option<u16> {
         dest.and_then(|d| match d {
             MessageDestination::OneParty(id) => Some(id),
             MessageDestination::AllParties => None,
+        })
+    }
+    fn new_broadcast(
+        msg_id_gen: &MessageIdGenerator,
+        sender: u16,
+        item: Outgoing<M>,
+    ) -> Result<Self, NetworkError> {
+        Ok(WireMessage {
+            id: msg_id_gen.next_id(),
+            sender,
+            receiver: None,
+            payload: bincode::serialize(&item.msg)
+                .map_err(|_| NetworkError::Connection("Payload serialization failed".into()))?,
+        })
+    }
+    fn new_p2p(
+        msg_id_gen: &MessageIdGenerator,
+        sender: u16,
+        item: Outgoing<M>,
+    ) -> Result<Self, NetworkError> {
+        Ok(WireMessage {
+            id: msg_id_gen.next_id(),
+            sender,
+            receiver: <WireMessage as RoundBasedWireMessage<M>>::from_message_destination(Some(
+                item.recipient,
+            )),
+            payload: bincode::serialize(&item.msg)
+                .map_err(|_| NetworkError::Connection("Payload serialization failed".into()))?,
         })
     }
 }
@@ -118,7 +191,6 @@ impl MessageState {
     }
 }
 
-
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct PartySession {
     pub party_id: u16,
@@ -137,9 +209,8 @@ pub enum SessionMessage {
     },
 }
 
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum NetworkMessage {
-    SessionMessage(SessionMessage), 
+    SessionMessage(SessionMessage),
     WireMessage(WireMessage),
 }

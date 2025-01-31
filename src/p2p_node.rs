@@ -25,7 +25,7 @@ pub enum MessageType {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct NetworkMessage {
+pub struct NetworkMessage {
     data: Vec<u8>,
     msg_type: MessageType,
 }
@@ -268,7 +268,7 @@ impl P2PNode {
             IdentTopic::new(topic_hash.to_string()),
             node.protocol.clone(),
         );
-        
+
         // Infer message type based on topic format
         if topic.is_broadcast() {
             // Broadcast message - forward to all sessions with matching session_id
@@ -357,7 +357,7 @@ impl P2PNode {
         Ok(())
     }
 
-    pub(crate) fn publish_message<M>(
+    pub fn publish_message<M>(
         &self,
         data: &M,
         recipient: Option<u16>,
