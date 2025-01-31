@@ -65,7 +65,7 @@
 //! * Message serialization errors
 //! * Client registration conflicts
 
-use crate::network::{MessageState, WireMessage, PartySession, SessionMessage};
+use crate::message::{MessageState, WireMessage, PartySession, SessionMessage};
 use futures::channel::{mpsc, mpsc::unbounded};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
