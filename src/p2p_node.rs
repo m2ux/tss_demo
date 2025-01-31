@@ -314,14 +314,12 @@ impl P2PNode {
     }
 
     /// Subscribes to relevant topics for a party
-    pub async fn subscribe_to_session<M>(
+    pub async fn subscribe_to_session(
         &self,
         party_id: u16,
         session_id: u16,
         sender: UnboundedSender<NetworkMessage>,
     ) -> Result<(), P2PError>
-    where
-        M: Serialize + for<'de> Deserialize<'de> + Send + 'static + Clone,
     {
         // Create topics using the new Topic struct
         let broadcast_topic = self.get_broadcast_topic(session_id);
@@ -357,6 +355,56 @@ impl P2PNode {
         Ok(())
     }
 
+    /// Unsubscribes from a session, removing all associated topic subscriptions and session data.
+    ///
+    /// This method removes the party from both broadcast and P2P topics for the specified session
+    /// and cleans up any associated session data.
+    ///
+    /// # Arguments
+    ///
+    /// * `party_id` - The ID of the party to unsubscribe
+    /// * `session_id` - The ID of the session to unsubscribe from
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if unsubscription was successful, or a `P2PError` if an error occurred.
+    ///
+    /// # Errors
+    ///
+    /// Returns `P2PError` if:
+    /// * Failed to acquire swarm lock
+    /// * Protocol error during unsubscription
+    pub async fn unsubscribe_from_session(
+        &self,
+        party_id: u16,
+        session_id: u16,
+    ) -> Result<(), P2PError> {
+        // Create topics using the existing topic creation methods
+        let broadcast_topic = self.get_broadcast_topic(session_id);
+        let p2p_topic = self.get_p2p_topic(party_id, session_id);
+
+        if let Ok(mut swarm) = self.swarm.try_lock() {
+            // Unsubscribe from broadcast topic
+            swarm
+                .behaviour_mut()
+                .unsubscribe(broadcast_topic.as_ident_topic());
+
+            // Unsubscribe from P2P topic
+            swarm
+                .behaviour_mut()
+                .unsubscribe(p2p_topic.as_ident_topic());
+        } else {
+            return Err(P2PError::Protocol("Failed to acquire swarm lock".into()));
+        }
+
+        // Remove session information from storage
+        let mut sessions = self.sessions.write().await;
+        sessions.remove(&broadcast_topic.hash());
+        sessions.remove(&p2p_topic.hash());
+
+        Ok(())
+    }
+    
     pub fn publish_message<M>(
         &self,
         data: &M,
