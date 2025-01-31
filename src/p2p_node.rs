@@ -23,13 +23,6 @@ pub enum MessageType {
     Broadcast,
     P2P,
 }
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct P2PMessage {
-    pub(crate) data: Vec<u8>,
-    pub(crate) msg_type: MessageType,
-}
-
 /// Configuration for P2P network setup
 #[derive(Clone, Debug)]
 pub struct P2PConfig {
@@ -59,22 +52,15 @@ pub struct SessionInfo
 {
     pub party_id: u16,
     pub session_id: u16,
-    pub sender: mpsc::UnboundedSender<P2PMessage>,
+    pub sender: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 // Implement the trait for SessionInfo
 impl SessionInfo
 {
-    fn forward_message(&self, msg: P2PMessage) {
-        match bincode::deserialize::<Vec<u8>>(&msg.data) {
-            Ok(_) => {
-                if let Err(e) = self.sender.send(msg) {
-                    println!("Failed to forward message: {}", e);
-                }
-            }
-            Err(e) => {
-                println!("Failed to deserialize message: {}", e);
-            }
+    fn forward_message(&self, data: Vec<u8>) {
+        if let Err(e) = self.sender.send(data) {
+            println!("Failed to forward message: {}", e);
         }
     }
 }
@@ -273,30 +259,18 @@ impl P2PNode {
         if topic.is_broadcast() {
             // Broadcast message - forward to all sessions with matching session_id
             if let Some(session_id) = topic.session_id() {
-                // Create broadcast network message
-                let network_msg = P2PMessage {
-                    data: data.clone(),
-                    msg_type: MessageType::Broadcast,
-                };
-
                 // Forward the network message
                 for session in sessions.values() {
                     if session.session_id == session_id {
-                        session.forward_message(network_msg.clone());
+                        session.forward_message(data.clone());
                     }
                 }
             }
         } else if topic.is_p2p(){
             // P2P message - forward only to the specific session matching the topic
             if let Some(session) = sessions.get(&topic.hash()) {
-                // Create P2P network message
-                let network_msg = P2PMessage {
-                    data,
-                    msg_type: MessageType::P2P,
-                };
-
                 // Forward the network message
-                session.forward_message(network_msg);
+                session.forward_message(data);
             }
         } else {
             // TODO: Error: Unrecognised topic
@@ -318,7 +292,7 @@ impl P2PNode {
         &self,
         party_id: u16,
         session_id: u16,
-        sender: mpsc::UnboundedSender<P2PMessage>,
+        sender: mpsc::UnboundedSender<Vec<u8>>,
     ) -> Result<(), P2PError>
     {
         // Create topics using the new Topic struct

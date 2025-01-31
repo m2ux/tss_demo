@@ -1,6 +1,6 @@
-use crate::message::NetworkMessage;
+use crate::message::{NetworkMessage, WireMessage};
 use crate::network::{NetworkError, StreamDelivery};
-use crate::p2p_node::{MessageType, P2PMessage, P2PNode};
+use crate::p2p_node::{MessageType, P2PNode};
 use futures::{Sink, Stream, StreamExt};
 use futures_util::SinkExt;
 use serde::{Deserialize, Serialize};
@@ -22,8 +22,8 @@ pub enum P2PStreamError {
 /// A wrapper around P2P communication that implements Stream + Sink for Vec<u8>
 pub struct P2PBinaryStream {
     node: Arc<P2PNode>,
-    receiver: mpsc::UnboundedReceiver<Vec<u8>>,
-    message_sender: mpsc::UnboundedSender<P2PMessage>,
+    to_network_receiver: mpsc::UnboundedReceiver<NetworkMessage>,
+    from_node_sender: mpsc::UnboundedSender<Vec<u8>>,
     party_id: u16,
     session_id: u16,
 }
@@ -35,28 +35,32 @@ impl P2PBinaryStream {
         party_id: u16,
         session_id: u16,
     ) -> Result<Self, P2PStreamError> {
-        let (sender, receiver) = unbounded_channel();
-        let (message_sender, mut message_receiver) = unbounded_channel();
+        let (to_network_sender, to_network_receiver) = unbounded_channel::<NetworkMessage>();
+        let (from_node_sender, mut from_node_receiver) = unbounded_channel::<Vec<u8>>();
 
         // Subscribe to P2P messages
-        node.subscribe_to_session(party_id, session_id, message_sender.clone())
+        node.subscribe_to_session(party_id, session_id, from_node_sender.clone())
             .await
             .map_err(P2PStreamError::Node)?;
 
-        // Spawn task to convert NetworkMessage to Vec<u8>
+        // Spawn task to convert P2PMessage to NetworkMessage
         tokio::spawn({
-            let sender = sender.clone();
+            let to_network_sender = to_network_sender.clone();
             async move {
-                while let Some(msg) = message_receiver.recv().await {
-                    let _ = sender.send(msg.data);
+                while let Some(msg) = from_node_receiver.recv().await {
+                    if let Ok(wire_msg) = bincode::deserialize::<WireMessage>(&msg) {
+                        to_network_sender
+                            .send(NetworkMessage::WireMessage(wire_msg))
+                            .unwrap_or_default();
+                    }
                 }
             }
         });
 
         Ok(Self {
             node,
-            receiver,
-            message_sender,
+            to_network_receiver,
+            from_node_sender,
             party_id,
             session_id,
         })
@@ -64,33 +68,35 @@ impl P2PBinaryStream {
 }
 
 impl Stream for P2PBinaryStream {
-    type Item = Result<Vec<u8>, P2PStreamError>;
+    type Item = Result<NetworkMessage, P2PStreamError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match futures::ready!(Pin::new(&mut self.receiver).poll_recv(cx)) {
+        match futures::ready!(Pin::new(&mut self.to_network_receiver).poll_recv(cx)) {
             Some(data) => Poll::Ready(Some(Ok(data))),
             None => Poll::Ready(None),
         }
     }
 }
 
-impl Sink<Vec<u8>> for P2PBinaryStream {
+impl Sink<NetworkMessage> for P2PBinaryStream {
     type Error = P2PStreamError;
 
     fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
-    fn start_send(self: Pin<&mut Self>, item: Vec<u8>) -> Result<(), Self::Error> {
-        // Wrap Vec<u8> in NetworkMessage and publish
-        let msg = P2PMessage {
-            data: item,
-            msg_type: MessageType::Broadcast, // Default to broadcast, can be adjusted based on needs
-        };
-
-        self.node
-            .publish_message(&msg, None, self.session_id)
-            .map_err(P2PStreamError::Node)
+    fn start_send(self: Pin<&mut Self>, item: NetworkMessage) -> Result<(), Self::Error> {
+        match item {
+            NetworkMessage::WireMessage(wire_msg) => self
+                .node
+                .publish_message(
+                    &wire_msg,
+                    wire_msg.receiver,
+                    self.session_id,
+                )
+                .map_err(P2PStreamError::Node),
+            NetworkMessage::SessionMessage(_) => Ok(()),
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -137,12 +143,7 @@ impl Stream for MessageStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.inner.poll_next_unpin(cx) {
-            Poll::Ready(Some(Ok(bytes))) => match bincode::deserialize(&bytes) {
-                Ok(msg) => Poll::Ready(Some(Ok(msg))),
-                Err(_) => Poll::Ready(Some(Err(P2PStreamError::Stream(
-                    "Failed to deserialize message".into(),
-                )))),
-            },
+            Poll::Ready(Some(Ok(msg))) => Poll::Ready(Some(Ok(msg))),
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
@@ -157,10 +158,8 @@ impl Sink<NetworkMessage> for MessageStream {
         self.inner.poll_ready_unpin(cx)
     }
 
-    fn start_send(mut self: Pin<&mut Self>, item: NetworkMessage) -> Result<(), Self::Error> {
-        let bytes = bincode::serialize(&item)
-            .map_err(|_| P2PStreamError::Stream("Failed to serialize message".into()))?;
-        self.inner.start_send_unpin(bytes)
+    fn start_send(mut self: Pin<&mut Self>, msg: NetworkMessage) -> Result<(), Self::Error> {
+        self.inner.start_send_unpin(msg)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
