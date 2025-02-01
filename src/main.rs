@@ -53,7 +53,6 @@
 //! * Curve: secp256k1
 //! * Hash function: SHA256
 
-mod committee;
 mod error;
 mod network;
 mod protocol;
@@ -61,6 +60,8 @@ mod server;
 mod service;
 mod signing;
 mod storage;
+mod websocket;
+mod message;
 
 use std::time::Duration;
 use clap::Parser;

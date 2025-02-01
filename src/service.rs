@@ -30,7 +30,7 @@
 //! ```
 
 use crate::error::Error;
-use crate::network::{WsDelivery, WsReceiver, WsSender};
+use crate::network::{Receiver, Sender};
 use crate::protocol::{CommitteeSession, ControlMessage};
 use crate::signing::SigningProtocolMessage;
 use futures_util::StreamExt;
@@ -53,13 +53,14 @@ state_machine! {
     /// - Failed: Triggers transition to Exit from any state
     #[derive(Debug)]
     service(SendingRequest)
-    
+
     SendingRequest => {
         RequestSent => Exit,
         Failed => Exit
     }
 }
 
+use crate::websocket::WsDelivery;
 use service::Input;
 
 /// Environment data for the service state machine.
@@ -168,13 +169,13 @@ impl Service {
         let monitor_handle = tokio::spawn(async move {
             monitor_ready_sign_messages(context_clone, control_receiver).await
         });
-        
+
         // Run the main service loop
         let result = self.run_machine(signing_sender).await;
-        
+
         // Clean up
         monitor_handle.abort();
-        
+
         result
     }
 
@@ -187,8 +188,8 @@ impl Service {
     /// * `Result<(), Error>` - Success or error status
     async fn run_machine(
         &mut self,
-        mut sender: WsSender<SigningProtocolMessage>,
-    ) -> Result<(), Error> {         
+        mut sender: Sender<SigningProtocolMessage>,
+    ) -> Result<(), Error> {
         loop {
             let mut context = self.context.write().await;
 
@@ -218,7 +219,7 @@ impl Service {
                     // Post-transition actions
                 }
             }
-            
+
             // Prevent tight loop
             drop(context);
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -233,7 +234,7 @@ impl Service {
 /// * `receiver` - WebSocket receiver for control messages
 async fn monitor_ready_sign_messages(
     context: Arc<RwLock<ServiceEnv>>,
-    mut receiver: WsReceiver<ControlMessage>,
+    mut receiver: Receiver<ControlMessage>,
 ) {
     while let Some(Ok(message)) = receiver.next().await {
         if matches!(message.msg, ControlMessage::ReadyToSign) {
