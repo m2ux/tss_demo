@@ -24,9 +24,10 @@
 //!    - Handles signing requests in Ready state
 use crate::error::Error;
 use crate::network;
-use crate::network::{WsDelivery, WsReceiver, WsSender};
+use crate::network::{Receiver, Sender};
 use crate::signing::Signing;
 use crate::storage::KeyStorage;
+use crate::websocket::WsDelivery;
 use cggmp21::key_share::AuxInfo;
 use cggmp21::{
     key_refresh::AuxOnlyMsg, keygen::ThresholdMsg, security_level::SecurityLevel128,
@@ -288,7 +289,7 @@ impl Protocol {
     /// * `Result<(), Error>` - Success or error status
     async fn run_handler(
         &mut self,
-        mut sender: WsSender<ControlMessage>,
+        mut sender: Sender<ControlMessage>,
         server_addr: &str,
     ) -> Result<(), Error> {
         // Get the party ID
@@ -329,8 +330,7 @@ impl Protocol {
                     } else {
                         sender
                             .broadcast(ControlMessage::CommitteeMemberAnnouncement)
-                            .await
-                            .map_err(Error::Network)?;
+                            .await?;
 
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
@@ -484,7 +484,7 @@ impl Protocol {
     /// * `Result<(), Error>` - Success or error status
     async fn handle_messages(
         context: Arc<RwLock<ProtocolEnv>>,
-        mut receiver: WsReceiver<ControlMessage>,
+        mut receiver: Receiver<ControlMessage>,
     ) -> Result<(), Error> {
         pub async fn handle_message(
             incoming: Incoming<ControlMessage>,
