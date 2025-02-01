@@ -96,12 +96,12 @@ where
     M: Serialize + for<'de> Deserialize<'de>,
 {
     fn drop(&mut self) {
-        let unreg_msg = SessionMessage::Unregister {
-            session: PartySession {
-                party_id: self.party_id,
-                session_id: self.session_id,
-            },
-        };
+            let unreg_msg = SessionMessage::Unregister {
+                session: PartySession {
+                    party_id: self.party_id,
+                    session_id: self.session_id,
+                },
+            };
 
         let _ = self
             .sender

@@ -322,32 +322,32 @@ impl WsServer {
             async move {
                 while let Some(Ok(msg)) = ws_receiver.next().await {
                     if let Message::Binary(data) = msg {
-                        // Try to deserialize as WireMessage (Protocol Message)
-                        if let Ok(wire_msg) = bincode::deserialize::<WireMessage>(&data) {
-                            Self::handle_client_message(
-                                &party_session,
-                                wire_msg,
-                                &clients_for_receiver,
-                            )
-                            .await;
-                            continue;
+                        match bincode::deserialize(&data) {
+                            Ok(network_msg) => match network_msg {
+                                NetworkMessage::WireMessage(wire_msg) => {
+                                    Self::handle_client_message(
+                                        &party_session,
+                                        wire_msg,
+                                        &clients_for_receiver,
+                                    )
+                                    .await;
+                                }
+                                NetworkMessage::SessionMessage(session_msg) => {
+                                    Self::handle_server_message(
+                                        &party_session,
+                                        session_msg,
+                                        &clients_for_receiver,
+                                    )
+                                    .await;
+                                }
+                            },
+                            Err(_) => {
+                                println!(
+                                    "Unable to deserialize message from party {}, session {}",
+                                    &party_session.party_id, &party_session.session_id
+                                );
+                            }
                         }
-
-                        // Try to deserialize as ServerMessage
-                        if let Ok(server_msg) = bincode::deserialize::<SessionMessage>(&data) {
-                            Self::handle_server_message(
-                                &party_session,
-                                server_msg,
-                                &clients_for_receiver,
-                            )
-                            .await;
-                            continue;
-                        }
-
-                        println!(
-                            "Unable to deserialize message from party {}, session {}",
-                            &party_session.party_id, &party_session.session_id
-                        );
                     }
                 }
                 /*println!(
@@ -422,8 +422,8 @@ impl WsServer {
                     party_id: receiver_id,
                     session_id: party_session.session_id,
                 }) {
-                    let encoded =
-                        bincode::serialize(&wire_msg).expect("Failed to serialize wire message");
+                    let encoded = bincode::serialize(&NetworkMessage::WireMessage(wire_msg.clone()))
+                        .expect("Failed to serialize wire message");
                     let _ = client_session
                         .sender
                         .unbounded_send(Message::Binary(encoded));
@@ -441,7 +441,7 @@ impl WsServer {
                             "[S{}] Broadcast from party {}",
                             session.session_id, session.party_id
                         );
-                        let encoded = bincode::serialize(&wire_msg)
+                        let encoded = bincode::serialize(&NetworkMessage::WireMessage(wire_msg.clone()))
                             .expect("Failed to serialize wire message");
                         let _ = client_session
                             .sender
@@ -464,14 +464,14 @@ impl WsServer {
     /// Returns Ok(()) if unregistration was successful, regardless of whether
     /// the client was actually registered.
     async fn unregister_client(
-        session: &PartySession,
+        party_session: &PartySession,
         clients: &Arc<RwLock<HashMap<PartySession, ClientSession>>>,
     ) -> Result<(), ServerError> {
         let mut clients_lock = clients.write().await;
-        if clients_lock.remove(session).is_some() {
+        if clients_lock.remove(party_session).is_some() {
             println!(
                 "[S{}] Unregistered party {}",
-                &session.session_id, session.party_id
+                &party_session.session_id, party_session.party_id
             );
         }
         Ok(())

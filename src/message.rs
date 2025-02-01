@@ -198,9 +198,8 @@ pub struct PartySession {
 }
 
 /// Message type for session coordination
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub enum SessionMessage {
-    /// Register with party ID
     Register {
         session: PartySession,
     },
@@ -209,7 +208,7 @@ pub enum SessionMessage {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub enum NetworkMessage {
     SessionMessage(SessionMessage),
     WireMessage(WireMessage),
