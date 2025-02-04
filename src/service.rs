@@ -29,10 +29,10 @@
 //! }
 //! ```
 
+use crate::committee::{CommitteeSession, ControlMessage};
 use crate::error::Error;
 use crate::network::{Receiver, Sender};
-use crate::protocol::{CommitteeSession, ControlMessage};
-use crate::signing::SigningProtocolMessage;
+use crate::signing::Message;
 use futures_util::StreamExt;
 use round_based::Delivery;
 use rust_fsm::*;
@@ -60,6 +60,8 @@ state_machine! {
     }
 }
 
+use crate::p2p::P2PDelivery;
+use crate::p2p_node::P2PNode;
 use crate::websocket::WsDelivery;
 use service::Input;
 
@@ -116,11 +118,13 @@ impl ServiceEnv {
 }
 
 /// Main service structure managing the signing request process.
-struct Service {
+pub(crate) struct Service {
     /// State machine instance
     fsm: StateMachine<service::Impl>,
     /// Shared service environment
     context: Arc<RwLock<ServiceEnv>>,
+    p2p_node: Arc<P2PNode>,
+    party_id: u16,
 }
 
 impl Service {
@@ -128,11 +132,17 @@ impl Service {
     ///
     /// # Arguments
     /// * `message` - The message to be signed
-    fn new(message: String) -> Self {
-        Self {
+    pub async fn new(
+        party_id: u16,
+        p2p_node: Arc<P2PNode>,
+        message: String,
+    ) -> Result<Self, Error> {
+        Ok(Self {
             fsm: StateMachine::new(),
             context: Arc::new(RwLock::new(ServiceEnv::new(message))),
-        }
+            p2p_node,
+            party_id,
+        })
     }
 
     /// Runs the service, managing WebSocket connections and message handling.
@@ -143,11 +153,11 @@ impl Service {
     ///
     /// # Returns
     /// * `Result<(), Error>` - Success or error status
-    async fn run(&mut self, server_addr: String, party_id: u16) -> Result<(), Error> {
-        // Create delivery instance for protocol control messages
-        let control_delivery = WsDelivery::<ControlMessage>::connect(
-            &server_addr,
-            party_id,
+    pub async fn run(&mut self) -> Result<(), Error> {
+        // Initialize P2P delivery for control messages
+        let control_delivery = P2PDelivery::<ControlMessage>::connect(
+            Arc::clone(&self.p2p_node),
+            self.party_id,
             CommitteeSession::Control,
         )
         .await?;
@@ -155,9 +165,9 @@ impl Service {
         let (control_receiver, _) = control_delivery.split();
 
         // Create delivery instance for signing messages
-        let signing_delivery = WsDelivery::<SigningProtocolMessage>::connect(
-            &server_addr,
-            party_id,
+        let signing_delivery = P2PDelivery::<Message>::connect(
+            Arc::clone(&self.p2p_node),
+            self.party_id,
             CommitteeSession::SigningControl,
         )
         .await?;
@@ -186,10 +196,7 @@ impl Service {
     ///
     /// # Returns
     /// * `Result<(), Error>` - Success or error status
-    async fn run_machine(
-        &mut self,
-        mut sender: Sender<SigningProtocolMessage>,
-    ) -> Result<(), Error> {
+    async fn run_machine(&mut self, mut sender: Sender<Message>) -> Result<(), Error> {
         loop {
             let mut context = self.context.write().await;
 
@@ -197,7 +204,7 @@ impl Service {
                 (service::State::SendingRequest, _) => {
                     println!("Sending signature request");
                     // Create and send the sign request
-                    let request = SigningProtocolMessage::SignRequest {
+                    let request = Message::SignRequest {
                         message: context.message.as_bytes().to_vec(),
                     };
 
@@ -242,49 +249,4 @@ async fn monitor_ready_sign_messages(
             context.mark_ready_sign_received();
         }
     }
-}
-
-/// Runs the application in signing-service mode.
-///
-/// This function initializes and runs a service that:
-/// 1. Waits for the committee to be ready (10 seconds after receiving ReadyToSign)
-/// 2. Sends a signing request with the provided message
-/// 3. Exits after the request is sent or on failure
-///
-/// # Arguments
-/// * `server_addr` - WebSocket server address
-/// * `party_id` - ID of this party in the signing protocol
-/// * `message` - Message to be signed
-///
-/// # Returns
-/// * `Result<(), Error>` - Success or error status
-///
-/// # Example
-/// ```no_run
-/// use cggmp21_demo::service::run_service_mode;
-///
-/// #[tokio::main]
-/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     run_service_mode(
-///         "ws://localhost:8080".to_string(),
-///         1,
-///         "Message to sign".to_string()
-///     ).await?;
-///     Ok(())
-/// }
-/// ```
-pub async fn run_service_mode(
-    server_addr: String,
-    party_id: u16,
-    message: String,
-) -> Result<(), Error> {
-    println!("Starting signing process for message: {}", message);
-
-    // Create and run the service
-    let mut service = Service::new(message);
-    service.run(server_addr, party_id).await?;
-
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    println!("Signing request sent successfully");
-    Ok(())
 }

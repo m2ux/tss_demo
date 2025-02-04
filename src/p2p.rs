@@ -23,6 +23,7 @@ pub struct P2PMessageStream {
     node: Arc<P2PNode>,
     to_network_receiver: mpsc::UnboundedReceiver<NetworkMessage>,
     from_node_sender: mpsc::UnboundedSender<Vec<u8>>,
+    to_node_sender: mpsc::UnboundedSender<NetworkMessage>,
     party_id: u16,
     session_id: u16,
 }
@@ -36,6 +37,7 @@ impl P2PMessageStream {
     ) -> Result<Self, P2PStreamError> {
         let (to_network_sender, to_network_receiver) = unbounded_channel::<NetworkMessage>();
         let (from_node_sender, mut from_node_receiver) = unbounded_channel::<Vec<u8>>();
+        let (to_node_sender, mut to_node_receiver) = unbounded_channel::<NetworkMessage>();
 
         // Subscribe to P2P messages
         node.subscribe_to_session(party_id, session_id, from_node_sender.clone())
@@ -56,10 +58,26 @@ impl P2PMessageStream {
             }
         });
 
+        // Spawn task to handle outgoing messages
+        let node_clone = node.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = to_node_receiver.recv().await {
+                if let NetworkMessage::WireMessage(wire_msg) = msg {
+                    if let Err(e) = node_clone
+                        .publish_message(&wire_msg, wire_msg.receiver, session_id)
+                        .await
+                    {
+                        println!("Error publishing message: {}", e);
+                    }
+                }
+            }
+        });
+
         Ok(Self {
             node,
             to_network_receiver,
             from_node_sender,
+            to_node_sender,
             party_id,
             session_id,
         })
@@ -85,17 +103,10 @@ impl Sink<NetworkMessage> for P2PMessageStream {
     }
 
     fn start_send(self: Pin<&mut Self>, item: NetworkMessage) -> Result<(), Self::Error> {
-        match item {
-            NetworkMessage::WireMessage(wire_msg) => self
-                .node
-                .publish_message(
-                    &wire_msg,
-                    wire_msg.receiver,
-                    self.session_id,
-                )
-                .map_err(P2PStreamError::Node),
-            NetworkMessage::SessionMessage(_) => Ok(()),
-        }
+        // Send the message to the background task instead of publishing directly
+        self.to_node_sender
+            .send(item)
+            .map_err(|_| P2PStreamError::Stream("Failed to send message to publishing task".into()))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -140,6 +151,6 @@ where
             party_id,
             session,
         )
-            .await
+        .await
     }
 }

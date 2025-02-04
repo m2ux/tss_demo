@@ -36,11 +36,11 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
+use cggmp21::supported_curves::Secp256k1;
+use cggmp21::KeyShare;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use cggmp21::KeyShare;
-use cggmp21::supported_curves::Secp256k1;
 
 /// Errors that can occur during storage operations.
 ///
@@ -210,7 +210,11 @@ impl KeyStorage {
         Ok(rmp_serde::from_slice(&decrypted)?)
     }
 
-    pub fn save_key_share(&self, key_id: &str, share: &KeyShare<Secp256k1>) -> Result<(), StorageError> {
+    pub fn save_key_share(
+        &self,
+        key_id: &str,
+        share: &KeyShare<Secp256k1>,
+    ) -> Result<(), StorageError> {
         // Serialize to a Vec<u8> using pot
         let serialized = rmp_serde::to_vec(&share)?;
         let nonce = Nonce::from_slice(b"unique nonce");
@@ -461,7 +465,10 @@ mod tests {
 
         if let Ok(serialized) = result {
             let deserialized: Vec<u8> = pot::from_slice(&serialized).unwrap();
-            assert_eq!(sample_bytes, deserialized, "Serialized and deserialized bytes should match");
+            assert_eq!(
+                sample_bytes, deserialized,
+                "Serialized and deserialized bytes should match"
+            );
         }
     }
 }

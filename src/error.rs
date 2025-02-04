@@ -80,7 +80,7 @@ pub enum Error {
     /// message delivery issues, and WebSocket-related problems.
     #[error("Network error: {0}")]
     Delivery(#[from] network::DeliveryError),
-    
+
     /// Storage-related errors, including file I/O issues,
     /// encryption/decryption failures, and data persistence problems.
     #[error("Storage error: {0}")]

@@ -39,16 +39,12 @@ impl WebSocketMessageStream {
     /// Helper method to handle incoming WebSocket messages
     fn handle_message(msg: Message) -> Result<Option<NetworkMessage>, WebSocketError> {
         match msg {
-            Message::Binary(data) => {
-                bincode::deserialize(&data)
-                    .map(Some)
-                    .map_err(WebSocketError::Serialization)
-            }
-            Message::Text(text) => {
-                bincode::deserialize(text.as_bytes())
-                    .map(Some)
-                    .map_err(WebSocketError::Serialization)
-            }
+            Message::Binary(data) => bincode::deserialize(&data)
+                .map(Some)
+                .map_err(WebSocketError::Serialization),
+            Message::Text(text) => bincode::deserialize(text.as_bytes())
+                .map(Some)
+                .map_err(WebSocketError::Serialization),
             Message::Close(_) => Ok(None),
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => Ok(None),
         }

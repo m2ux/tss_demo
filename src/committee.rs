@@ -23,11 +23,11 @@
 //!    - Committee becomes ready for signing operations
 //!    - Handles signing requests in Ready state
 use crate::error::Error;
-use crate::network;
 use crate::network::{Receiver, Sender};
-use crate::signing::Signing;
+use crate::p2p::P2PDelivery; // Update imports
+use crate::p2p_node::{P2PConfig, P2PNode};
 use crate::storage::KeyStorage;
-use crate::websocket::WsDelivery;
+use crate::{network, signing};
 use cggmp21::key_share::AuxInfo;
 use cggmp21::{
     key_refresh::AuxOnlyMsg, keygen::ThresholdMsg, security_level::SecurityLevel128,
@@ -135,7 +135,7 @@ pub enum CommitteeSession {
     Control,
     Protocol,
     SigningControl,
-    Signing,
+    SigningProtocol,
 }
 
 impl From<CommitteeSession> for u16 {
@@ -144,7 +144,7 @@ impl From<CommitteeSession> for u16 {
     }
 }
 
-/// Main protocol coordinator managing committee lifecycle and operations
+/// Committee protocol coordinator managing committee lifecycle and operations
 ///
 /// Handles:
 /// - Committee formation and management
@@ -153,16 +153,18 @@ impl From<CommitteeSession> for u16 {
 /// - Signing operations
 pub struct Protocol {
     /// Shared protocol environment containing committee state
-    context: Arc<RwLock<ProtocolEnv>>,
+    context: Arc<RwLock<Context>>,
     /// Storage for cryptographic keys and protocol data
     storage: KeyStorage,
     /// Signing protocol implementation
-    signing: Signing,
+    signing: signing::Protocol,
+    p2p_node: Arc<P2PNode>,
+    party_id: u16,
 }
 
-/// Protocol environment maintaining committee state and coordination data
+/// Committee protocol context maintaining committee state and coordination data
 #[derive(Debug)]
-struct ProtocolEnv {
+struct Context {
     /// Set of current committee member IDs
     pub committee_members: HashSet<u16>,
     /// Set of parties that have completed auxiliary info generation
@@ -178,7 +180,7 @@ struct ProtocolEnv {
 }
 
 /// Protocol environment maintaining committee state and coordination data
-impl ProtocolEnv {
+impl Context {
     /// Creates a new ProtocolEnv instance with empty state
     pub fn new() -> Self {
         Self {
@@ -227,7 +229,7 @@ impl Protocol {
     ///
     /// # Returns
     /// * `Result<Protocol, Error>` - New protocol instance or error
-    pub async fn new(party_id: u16) -> Result<Self, Error> {
+    pub async fn new(party_id: u16, p2p_node: Arc<P2PNode>) -> Result<Self, Error> {
         // Initialize storage
         let storage = KeyStorage::new(
             format!("keys_{}", party_id),
@@ -235,30 +237,31 @@ impl Protocol {
         )?;
 
         // Initialize the signing protocol
-        let signing = Signing::new(storage.clone()).await?;
+        let signing = signing::Protocol::new(party_id, p2p_node.clone(), storage.clone()).await?;
 
         Ok(Self {
-            context: Arc::new(RwLock::new(ProtocolEnv::new())),
+            context: Arc::new(RwLock::new(Context::new())),
             storage,
             signing,
+            p2p_node,
+            party_id,
         })
     }
 
     /// Starts the protocol, connecting to the specified server
     ///
-    /// # Arguments
-    /// * `server_addr` - Address of the coordination server
-    /// * `party_id` - Unique identifier for this protocol participant
-    ///
     /// # Returns
     /// * `Result<(), Error>` - Success or error status
-    pub async fn start(&mut self, server_addr: String, party_id: u16) -> Result<(), Error> {
-        println!("Starting in committee mode with party ID: {}", party_id);
+    pub async fn start(&mut self) -> Result<(), Error> {
+        println!(
+            "Starting in committee mode with party ID: {}",
+            self.party_id
+        );
 
-        // Initialize the control message transport
-        let delivery = WsDelivery::<ControlMessage>::connect(
-            &server_addr,
-            party_id,
+        // Initialize P2P delivery for control messages
+        let delivery = P2PDelivery::<ControlMessage>::connect(
+            Arc::clone(&self.p2p_node),
+            self.party_id,
             CommitteeSession::Control,
         )
         .await?;
@@ -268,7 +271,7 @@ impl Protocol {
 
         // Spawn message receiving task
         let message_handler = Protocol::handle_messages(Arc::clone(&self.context), receiver);
-        let run_handler = self.run_handler(sender, &server_addr);
+        let run_handler = self.run(sender);
 
         // End on termination of either handler
         tokio::select! {
@@ -279,7 +282,7 @@ impl Protocol {
         Ok(())
     }
 
-    /// Runs the committee initialization process and manages state transitions
+    /// Runs the committee coordination process
     ///
     /// # Arguments
     /// * `sender` - Channel for sending control messages
@@ -287,11 +290,7 @@ impl Protocol {
     ///
     /// # Returns
     /// * `Result<(), Error>` - Success or error status
-    async fn run_handler(
-        &mut self,
-        mut sender: Sender<ControlMessage>,
-        server_addr: &str,
-    ) -> Result<(), Error> {
+    async fn run(&mut self, mut sender: Sender<ControlMessage>) -> Result<(), Error> {
         // Get the party ID
         let party_id = sender.get_party_id();
 
@@ -393,9 +392,9 @@ impl Protocol {
 
                     // Generate auxiliary info as per CGGMP21
                     let aux_info = Protocol::generate_auxiliary_info(
+                        Arc::clone(&self.p2p_node),
                         party_id,
                         context.committee_members.len() as u16,
-                        server_addr,
                         ExecutionId::new(execution_id.as_bytes()),
                     )
                     .await?;
@@ -421,9 +420,9 @@ impl Protocol {
                     let execution_id = self.storage.load::<String>("execution_id")?;
 
                     let incomplete_key_share = Protocol::generate_key_share(
+                        Arc::clone(&self.p2p_node),
                         party_id,
                         &context.committee_members,
-                        server_addr,
                         ExecutionId::new(execution_id.as_bytes()),
                     )
                     .await?;
@@ -465,7 +464,7 @@ impl Protocol {
                 }
                 CommitteeState::Ready => {
                     // Start the signing session
-                    self.signing.start(party_id, server_addr).await?;
+                    self.signing.start().await?;
 
                     // After session ends, end committee session
                     committee_state = CommitteeState::AwaitingMembers;
@@ -483,12 +482,12 @@ impl Protocol {
     /// # Returns
     /// * `Result<(), Error>` - Success or error status
     async fn handle_messages(
-        context: Arc<RwLock<ProtocolEnv>>,
+        context: Arc<RwLock<Context>>,
         mut receiver: Receiver<ControlMessage>,
     ) -> Result<(), Error> {
         pub async fn handle_message(
             incoming: Incoming<ControlMessage>,
-            context: &Arc<RwLock<ProtocolEnv>>,
+            context: &Arc<RwLock<Context>>,
         ) -> Result<(), Error> {
             let mut protocol = context.write().await;
 
@@ -549,7 +548,6 @@ impl Protocol {
             }
         }
     }
-
     /// Generates auxiliary information as per CGGMP21 specification
     ///
     /// # Arguments
@@ -561,16 +559,16 @@ impl Protocol {
     /// # Returns
     /// * `Result<AuxInfo, Error>` - Generated auxiliary information or error
     async fn generate_auxiliary_info(
+        p2p_node: Arc<P2PNode>,
         party_id: u16,
         n_parties: u16,
-        server_addr: &str,
         eid: ExecutionId<'_>,
     ) -> Result<AuxInfo, Error> {
         println!("Generating auxiliary information for party {}", party_id);
 
-        // Create a new delivery instance for aux info generation
-        let delivery = WsDelivery::<AuxOnlyMsg<Sha256, SecurityLevel128>>::connect(
-            server_addr,
+        // Create P2P delivery instance for aux info generation
+        let delivery = P2PDelivery::<AuxOnlyMsg<Sha256, SecurityLevel128>>::connect(
+            p2p_node,
             party_id,
             CommitteeSession::Protocol,
         )
@@ -597,22 +595,21 @@ impl Protocol {
     /// # Returns
     /// * `Result<CoreKeyShare<Secp256k1>, Error>` - Generated key share or error
     async fn generate_key_share(
+        p2p_node: Arc<P2PNode>,
         party_id: u16,
         committee: &HashSet<u16>,
-        server_addr: &str,
         eid: ExecutionId<'_>,
     ) -> Result<CoreKeyShare<Secp256k1>, Error> {
         println!("Starting distributed key generation for party {}", party_id);
 
-        // Create a new delivery instance for key generation
-        let delivery = WsDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
-            server_addr,
+        // Create P2P delivery instance for key generation
+        let delivery = P2PDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
+            p2p_node,
             party_id,
             CommitteeSession::Protocol,
         )
         .await?;
 
-        // Initialize key generation
         let keygen = cggmp21::keygen::<Secp256k1>(eid, party_id, committee.len() as u16)
             .set_threshold(3)
             .enforce_reliable_broadcast(true)

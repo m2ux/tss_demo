@@ -34,6 +34,7 @@ serde_json = "1.0.135"
 # Core libp2p crates
 libp2p = { version = "0.55.0", features = [
     "dns",
+    "gossipsub",
     "tcp",
     "websocket",
     "noise",
@@ -46,7 +47,7 @@ libp2p = { version = "0.55.0", features = [
     "macros"
 ]}
 libp2p-core = "0.43.0"
-libp2p-dns = "0.43.0"
+libp2p-mdns = "0.47.0"
 libp2p-identify = "0.46.0"
 libp2p-identity = "0.2.10"
 libp2p-gossipsub = "0.48.0"

@@ -2,12 +2,12 @@ use crate::message::{
     MessageIdGenerator, NetworkMessage, PartySession, RoundBasedWireMessage, SessionMessage,
     WireMessage,
 };
-use tokio::sync::{mpsc,mpsc::unbounded_channel};
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use round_based::{Delivery, Incoming, Outgoing};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use std::{marker::PhantomData, pin::Pin};
+use tokio::sync::{mpsc, mpsc::unbounded_channel};
 
 pub static MESSAGE_ID_GEN: MessageIdGenerator = MessageIdGenerator::new();
 
@@ -96,16 +96,14 @@ where
     M: Serialize + for<'de> Deserialize<'de>,
 {
     fn drop(&mut self) {
-            let unreg_msg = SessionMessage::Unregister {
-                session: PartySession {
-                    party_id: self.party_id,
-                    session_id: self.session_id,
-                },
-            };
+        let unreg_msg = SessionMessage::Unregister {
+            session: PartySession {
+                party_id: self.party_id,
+                session_id: self.session_id,
+            },
+        };
 
-        let _ = self
-            .sender
-            .send(NetworkMessage::SessionMessage(unreg_msg));
+        let _ = self.sender.send(NetworkMessage::SessionMessage(unreg_msg));
         std::thread::sleep(Duration::from_secs(1));
     }
 }

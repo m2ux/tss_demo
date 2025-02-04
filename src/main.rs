@@ -53,152 +53,129 @@
 //! * Curve: secp256k1
 //! * Hash function: SHA256
 
+mod committee;
 mod error;
+mod message;
 mod network;
-mod protocol;
+mod p2p;
+mod p2p_behaviour;
+mod p2p_node;
 mod server;
 mod service;
 mod signing;
 mod storage;
 mod websocket;
-mod p2p_node;
-mod p2p;
-mod message;
 
-use std::time::Duration;
-use clap::Parser;
+use crate::error::Error;
+use crate::p2p_node::P2PNode;
+use crate::service::Service;
+use clap::{Parser, Subcommand};
 use futures_util::TryFutureExt;
-use error::Error;
-use service::run_service_mode;
+use libp2p::Multiaddr;
+use std::str::FromStr;
+use std::time::Duration;
 
-impl From<std::io::Error> for Error {
-    fn from(err: std::io::Error) -> Self {
-        Error::Config(err.to_string())
-    }
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
 }
 
-impl From<tungstenite::Error> for Error {
-    fn from(err: tungstenite::Error) -> Self {
-        Error::Config(err.to_string())
-    }
+#[derive(Subcommand)]
+enum Command {
+    /// Run in bootstrap mode (previously server mode)
+    Bootstrap {
+        /// Party ID for this node
+        #[arg(short, long)]
+        party_id: u16,
+    },
+    /// Run in committee mode
+    Committee {
+        /// Party ID for this node
+        #[arg(short, long)]
+        party_id: u16,
+    },
+    /// Run in service mode
+    Service {
+        /// Message to be signed (initiates signing mode)
+        #[arg(short, long)]
+        message: String,
+    },
 }
 
-/// Operation modes for the application
-#[derive(Debug)]
-enum OperationMode {
-    /// Participate in the signing committee
-    Committee,
-    /// Operate as a signing service
-    Service(String),
-    /// Run as a WebSocket server
-    Server,
-}
-
-/// Command-line arguments
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
-struct Args {
-    /// Run in committee mode, participating in the signing committee
-    #[arg(long, conflicts_with_all = ["message", "server_mode"])]
-    committee: bool,
-
-    /// Message to be signed (initiates signing mode)
-    #[arg(short, long, conflicts_with_all = ["committee", "server_mode"])]
-    message: Option<String>,
-
-    /// Run as WebSocket server
-    #[arg(long, conflicts_with_all = ["committee", "message", "party_id"])]
-    server_mode: bool,
-
-    /// Local party ID for this instance
-    #[arg(short, long)]
-    party_id: Option<u16>,
-
-    /// WebSocket server address
-    #[arg(short, long)]
-    server: String,
-}
-
-/// Main entry point for the CGGMP21 demo application
 #[tokio::main]
-async fn main() -> Result<(), Error> {
-    // Parse command-line arguments
-    let args = Args::parse();
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
 
-    // Determine operation mode
-    let mode = if args.server_mode {
-        OperationMode::Server
-    } else if args.committee {
-        OperationMode::Committee
-    } else if let Some(msg) = args.message.clone() {
-        OperationMode::Service(msg)
-    } else {
-        return Err(Error::Config(
-            "Either --committee, --message, or --server-mode must be specified".into(),
-        ));
-    };
+    // Fixed bootstrap addresses
+    let bootstrap_addresses = vec![format!("/ip4/0.0.0.0/tcp/{}", 10333)];
 
-    match mode {
-        OperationMode::Server => {
-            run_server_mode(&args.server).await?;
+    match cli.command {
+        Command::Bootstrap { party_id } => {
+            run_bootstrap_mode(party_id, bootstrap_addresses).await?;
         }
-        _ => {
-            let party_id = args.party_id.ok_or_else(|| {
-                Error::Config("Party ID is required for committee and service modes".into())
-            })?;
-
-            // Select operating mode
-            match mode {
-                OperationMode::Committee => {
-                    run_committee_mode(args.server, party_id).await?;
-                }
-                OperationMode::Service(message) => {
-                    run_service_mode(args.server, party_id, message).await?;
-                }
-                OperationMode::Server => unreachable!(),
-            }
+        Command::Committee { party_id } => {
+            run_committee_mode(party_id, bootstrap_addresses).await?;
+        }
+        Command::Service { message } => {
+            run_service_mode(bootstrap_addresses, message).await?;
         }
     }
 
     Ok(())
 }
 
-/// Runs the application in server mode, handling WebSocket connections
-async fn run_server_mode(server_addr: &str) -> Result<(), Error> {
-    // If the address starts with "ws://", remove it for TCP binding
-    let bind_addr = server_addr
-        .trim_start_matches("ws://")
-        .trim_start_matches("wss://");
+async fn run_bootstrap_mode(party_id: u16, addresses: Vec<String>) -> Result<(), Error> {
+    println!("Starting committee (bootstrap) mode. Party: {}", party_id);
+    println!("Listening and advertising on: {:?}", addresses);
 
-    println!("Starting WebSocket server on {}", bind_addr);
-
-    // Parse the server address
-    let addr = bind_addr
-        .parse()
-        .map_err(|e| Error::Config(format!("Invalid server address: {}", e)))?;
-
-    // Create and run the WebSocket server
-    let server = server::WsServer::new(addr);
-
-    println!("WebSocket server listening for connections...");
-
-    // Run the server (this blocks until shutdown)
-    server.run().await.map_err(Error::Server)?;
-
-    Ok(())
-}
-
-/// Runs the application in server mode, handling WebSocket connections
-pub async fn run_committee_mode(server_addr: String, party_id: u16) -> Result<(), Error> {
-    println!("Starting committee mode. Party: {}", party_id);
+    let p2p_node = P2PNode::connect(None, addresses, "cggmp".to_string())
+        .await
+        .map_err(|e| Error::Config(format!("Failed to initialize P2P node: {}", e)))?;
 
     // Create and run the service
-    let mut protocol =
-        protocol::Protocol::new(party_id).map_err(|e| Error::Protocol(e.to_string())).await?;
-
+    let mut protocol = committee::Protocol::new(party_id, p2p_node).await?;
     tokio::time::sleep(Duration::from_secs(1)).await;
+    protocol.start().await
+}
 
-    protocol.start(server_addr, party_id).await?;
+async fn run_committee_mode(party_id: u16, bootstrap_addresses: Vec<String>) -> Result<(), Error> {
+    println!("Starting committee mode. Party: {}", party_id);
+    println!("Bootstrap addresses: {:?}", bootstrap_addresses);
 
+    let p2p_node = P2PNode::connect(
+        Some(bootstrap_addresses),
+        vec![format!("/ip4/0.0.0.0/tcp/{}", 10334)],
+        "cggmp".to_string(),
+    )
+    .await
+    .map_err(|e| Error::Config(format!("Failed to initialize P2P node: {}", e)))?;
+
+    // Create and run the service
+    let mut protocol = committee::Protocol::new(party_id, p2p_node).await?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    protocol.start().await
+}
+
+pub async fn run_service_mode(
+    bootstrap_addresses: Vec<String>,
+    message: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Starting signing process for message: {}", message);
+    let party_id = 10;
+    let p2p_node = P2PNode::connect(
+        Some(bootstrap_addresses),
+        vec![format!("/ip4/0.0.0.0/tcp/{}", 10334 + party_id)],
+        "cggmp".to_string(),
+    )
+    .await
+    .map_err(|e| Error::Config(format!("Failed to initialize P2P node: {}", e)))?;
+
+    let mut service = Service::new(party_id, p2p_node, message).await?;
+    service.run().await?;
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    println!("Signing request sent successfully");
     Ok(())
 }

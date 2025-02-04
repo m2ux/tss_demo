@@ -200,12 +200,8 @@ pub struct PartySession {
 /// Message type for session coordination
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub enum SessionMessage {
-    Register {
-        session: PartySession,
-    },
-    Unregister {
-        session: PartySession,
-    },
+    Register { session: PartySession },
+    Unregister { session: PartySession },
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
