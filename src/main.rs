@@ -109,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // Fixed bootstrap addresses
-    let bootstrap_addresses = vec![format!("/ip4/0.0.0.0/tcp/{}", 10333)];
+    let bootstrap_addresses = vec![format!("/ip4/127.0.0.1/tcp/{}", 8000)];
 
     match cli.command {
         Command::Bootstrap { party_id } => {
@@ -135,9 +135,10 @@ async fn run_bootstrap_mode(party_id: u16, addresses: Vec<String>) -> Result<(),
         .map_err(|e| Error::Config(format!("Failed to initialize P2P node: {}", e)))?;
 
     // Create and run the service
-    let mut protocol = committee::Protocol::new(party_id, p2p_node).await?;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    protocol.start().await
+    //let mut committee_protocol = committee::Protocol::new(party_id, p2p_node).await?;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    //committee_protocol.start().await
+    Ok(())
 }
 
 async fn run_committee_mode(party_id: u16, bootstrap_addresses: Vec<String>) -> Result<(), Error> {
@@ -146,16 +147,17 @@ async fn run_committee_mode(party_id: u16, bootstrap_addresses: Vec<String>) -> 
 
     let p2p_node = P2PNode::connect(
         Some(bootstrap_addresses),
-        vec![format!("/ip4/0.0.0.0/tcp/{}", 10334)],
+        vec![format!("/ip4/0.0.0.0/tcp/{}", 10334 + party_id)],
         "cggmp".to_string(),
     )
     .await
     .map_err(|e| Error::Config(format!("Failed to initialize P2P node: {}", e)))?;
 
     // Create and run the service
-    let mut protocol = committee::Protocol::new(party_id, p2p_node).await?;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    protocol.start().await
+    //let mut committee_protocol = committee::Protocol::new(party_id, p2p_node).await?;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    //committee_protocol.start().await
+    Ok(())
 }
 
 pub async fn run_service_mode(

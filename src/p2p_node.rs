@@ -102,19 +102,21 @@ impl P2PNode {
     pub async fn new(config: P2PConfig) -> Result<Arc<Self>, P2PError> {
         // Create identity keypair
         let keypair = Keypair::generate_ed25519();
-        let peer_id = PeerId::from(keypair.public());
 
         let mut swarm = SwarmBuilder::with_existing_identity(keypair.clone())
             .with_tokio()
             .with_tcp(TcpConfig::default(), NoiseConfig::new, YamuxConfig::default)
             .map_err(|e| P2PError::Protocol(e.to_string()))?
             .with_behaviour(|key| {
-                println!("Local peer ID: {peer_id}");
-
+                let local_peer_id = PeerId::from(key.clone().public());
+                println!("LocalPeerID: {local_peer_id}");
+                
                 // Set up the Kademlia behavior for peer discovery.
-                let kad_config = KadConfig::new(StreamProtocol::new("/agent/connection/1.0.0"));
-                let kad_memory = KadInMemory::new(peer_id);
-                let kad = KadBehavior::with_config(peer_id, kad_memory, kad_config);
+                let mut kad_config = KadConfig::new(StreamProtocol::new("/ipfs/id/1.0.0"));
+                kad_config.set_query_timeout(Duration::from_secs(5 * 60));
+                
+                let kad_memory = KadInMemory::new(local_peer_id);
+                let kad = KadBehavior::with_config(local_peer_id, kad_memory, kad_config);
 
                 let identity_config = IdentifyConfig::new(
                     "/agent/connection/1.0.0".to_string(),
@@ -145,18 +147,24 @@ impl P2PNode {
             .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(30)))
             .build();
 
-        // Listen only if we're a bootstrap node or have a specific listen address
-        for addr in config.listen_addresses {
-            swarm
-                .listen_on(addr)
-                .map_err(|e| P2PError::Transport(e.to_string()))?;
-        }
-
+        swarm.behaviour_mut().set_server_mode();
+        
         // Regular nodes connect to bootstrap peers
         if !config.is_bootstrap_node {
+            swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap()).unwrap();
+            
             for addr in config.bootstrap_peers {
                 swarm
-                    .dial(addr)
+                    .dial(addr.clone())
+                    .map_err(|e| P2PError::Transport(e.to_string()))?;
+                println!("Dialed to: {addr}");
+            }
+        }
+        else{
+            // Listen only if we're a bootstrap node or have a specific listen address
+            for addr in config.listen_addresses {
+                swarm
+                    .listen_on(addr)
                     .map_err(|e| P2PError::Transport(e.to_string()))?;
             }
         }
@@ -255,8 +263,8 @@ impl P2PNode {
                 }) => {
                     println!("Connection closed with peer {}: {:?}", peer_id, endpoint);
                 }
-                Some(SwarmEvent::NewListenAddr { address, .. }) => {
-                    println!("Local node listening on {}", address);
+                Some(SwarmEvent::NewListenAddr { listener_id, address }) => {
+                    println!("NewListenAddr: {listener_id:?} | {address:?}");
                 }
                 Some(SwarmEvent::IncomingConnection {
                     local_addr,
@@ -277,7 +285,7 @@ impl P2PNode {
                 Some(_) => {}
                 None => {
                     // Small delay to prevent tight loop
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    //tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }
         }
