@@ -70,8 +70,10 @@ use crate::error::Error;
 use crate::p2p_node::P2PNode;
 use crate::service::Service;
 use clap::{Parser, Subcommand};
+use env_logger::{Builder, Env};
 use futures_util::TryFutureExt;
 use libp2p::Multiaddr;
+use log::info;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -106,6 +108,8 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize env_logger
+    Builder::from_env(Env::default().default_filter_or("info")).init();
     let cli = Cli::parse();
 
     // Fixed bootstrap addresses
@@ -127,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_bootstrap_mode(party_id: u16, addresses: Vec<String>) -> Result<(), Error> {
-    println!("Starting committee (bootstrap) mode. Party: {}", party_id);
+    info!("Starting committee (bootstrap) mode. Party: {}", party_id);
     println!("Listening and advertising on: {:?}", addresses);
 
     let p2p_node = P2PNode::connect(None, addresses, "cggmp".to_string())

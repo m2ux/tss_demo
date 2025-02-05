@@ -59,3 +59,5 @@ libp2p-tcp = { version = "0.43.0", features = ["tokio"] }
 libp2p-yamux = "0.47.0"
 async-trait = "0.1.85"
 bytes = "1.9.0"
+env_logger = "0.11.6"
+log = "0.4"

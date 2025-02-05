@@ -24,6 +24,7 @@ use libp2p_gossipsub::{Behaviour, Event as GossipEvent, Event, IdentTopic, Topic
 use libp2p_identity::{self, Keypair, PeerId};
 use libp2p_kad::store::MemoryStore;
 use libp2p_swarm::{NetworkBehaviour, SwarmEvent};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -110,11 +111,11 @@ impl P2PNode {
             .with_behaviour(|key| {
                 let local_peer_id = PeerId::from(key.clone().public());
                 println!("LocalPeerID: {local_peer_id}");
-                
+
                 // Set up the Kademlia behavior for peer discovery.
                 let mut kad_config = KadConfig::new(StreamProtocol::new("/ipfs/id/1.0.0"));
                 kad_config.set_query_timeout(Duration::from_secs(5 * 60));
-                
+
                 let kad_memory = KadInMemory::new(local_peer_id);
                 let kad = KadBehavior::with_config(local_peer_id, kad_memory, kad_config);
 
@@ -148,19 +149,20 @@ impl P2PNode {
             .build();
 
         swarm.behaviour_mut().set_server_mode();
-        
+
         // Regular nodes connect to bootstrap peers
         if !config.is_bootstrap_node {
-            swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap()).unwrap();
-            
+            swarm
+                .listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap())
+                .unwrap();
+
             for addr in config.bootstrap_peers {
                 swarm
                     .dial(addr.clone())
                     .map_err(|e| P2PError::Transport(e.to_string()))?;
                 println!("Dialed to: {addr}");
             }
-        }
-        else{
+        } else {
             // Listen only if we're a bootstrap node or have a specific listen address
             for addr in config.listen_addresses {
                 swarm
@@ -253,26 +255,26 @@ impl P2PNode {
                 Some(SwarmEvent::ConnectionEstablished {
                     peer_id, endpoint, ..
                 }) => {
-                    println!(
-                        "Connection established with peer {}: {:?}",
-                        peer_id, endpoint
-                    );
+                    info!("Connection established with peer: {}", peer_id);
                 }
                 Some(SwarmEvent::ConnectionClosed {
                     peer_id, endpoint, ..
                 }) => {
-                    println!("Connection closed with peer {}: {:?}", peer_id, endpoint);
+                    info!("Connection closed with peer: {}: {:?}", peer_id, endpoint);
                 }
-                Some(SwarmEvent::NewListenAddr { listener_id, address }) => {
-                    println!("NewListenAddr: {listener_id:?} | {address:?}");
+                Some(SwarmEvent::NewListenAddr {
+                    listener_id,
+                    address,
+                }) => {
+                    info!("New listen address: ({listener_id}): {address}");
                 }
                 Some(SwarmEvent::IncomingConnection {
                     local_addr,
                     send_back_addr,
                     ..
                 }) => {
-                    println!(
-                        "Incoming connection from {} to {}",
+                    info!(
+                        "Incoming connection from: {} to {}",
                         send_back_addr, local_addr
                     );
                 }
@@ -280,7 +282,7 @@ impl P2PNode {
                     peer_id,
                     connection_id: _,
                 }) => {
-                    println!("Dialing peer {:?}", peer_id);
+                    info!("Dialing peer: {:?}", peer_id);
                 }
                 Some(_) => {}
                 None => {
@@ -295,15 +297,15 @@ impl P2PNode {
 
     pub async fn handle_kadelia_event(node: Arc<Self>, event: KadEvent) {
         match event {
-            KadEvent::ModeChanged { new_mode } => println!("KadEvent:ModeChanged: {new_mode}"),
+            KadEvent::ModeChanged { new_mode } => info!("KadEvent:ModeChanged: {new_mode}"),
             KadEvent::RoutablePeer { peer, address } => {
-                println!("KadEvent:RoutablePeer: {peer} | {address}")
+                debug!("KadEvent:RoutablePeer: {peer} | {address}")
             }
             KadEvent::PendingRoutablePeer { peer, address } => {
-                println!("KadEvent:PendingRoutablePeer: {peer} | {address}")
+                debug!("KadEvent:PendingRoutablePeer: {peer} | {address}")
             }
             KadEvent::InboundRequest { request } => {
-                println!("KadEvent:InboundRequest: {request:?}")
+                debug!("KadEvent:InboundRequest: {request:?}")
             }
             KadEvent::RoutingUpdated {
                 peer,
@@ -312,7 +314,7 @@ impl P2PNode {
                 bucket_range,
                 old_peer,
             } => {
-                println!("KadEvent:RoutingUpdated: {peer} | IsNewPeer? {is_new_peer} | {addresses:?} | {bucket_range:?} | OldPeer: {old_peer:?}");
+                debug!("KadEvent:RoutingUpdated: {peer} | IsNewPeer? {is_new_peer} | {addresses:?} | {bucket_range:?} | OldPeer: {old_peer:?}");
             }
             KadEvent::OutboundQueryProgressed {
                 id,
@@ -320,7 +322,7 @@ impl P2PNode {
                 stats,
                 step,
             } => {
-                println!("KadEvent:OutboundQueryProgressed: ID: {id:?} | Result: {result:?} | Stats: {stats:?} | Step: {step:?}")
+                debug!("KadEvent:OutboundQueryProgressed: ID: {id:?} | Result: {result:?} | Stats: {stats:?} | Step: {step:?}")
             }
             _ => {}
         }
@@ -330,16 +332,17 @@ impl P2PNode {
         match event {
             GossipEvent::Message {
                 propagation_source: _propagation_source,
-                message_id: _message_id,
+                message_id,
                 message,
             } => {
+                info!("Message {} received", message_id);
                 Self::handle_incoming_message(&node, message.topic, message.data).await;
             }
             GossipEvent::Subscribed { peer_id, topic } => {
-                println!("Peer {} subscribed to topic {:?}", peer_id, topic);
+                info!("Peer {} subscribed to topic {:?}", peer_id, topic);
             }
             GossipEvent::Unsubscribed { peer_id, topic } => {
-                println!("Peer {} unsubscribed from topic {:?}", peer_id, topic);
+                info!("Peer {} unsubscribed from topic {:?}", peer_id, topic);
             }
             _ => {}
         }
@@ -350,18 +353,18 @@ impl P2PNode {
             IdentifyEvent::Sent {
                 connection_id: _connection_id,
                 peer_id,
-            } => println!("IdentifyEvent:Sent: {peer_id}"),
+            } => debug!("IdentifyEvent:Sent: {peer_id}"),
             IdentifyEvent::Pushed {
                 connection_id: _connection_id,
                 peer_id,
                 info,
-            } => println!("IdentifyEvent:Pushed: {peer_id} | {info:?}"),
+            } => debug!("IdentifyEvent:Pushed: {peer_id} | {info:?}"),
             IdentifyEvent::Received {
                 connection_id: _connection_id,
                 peer_id,
                 info,
             } => {
-                println!("IdentifyEvent:Received: {peer_id} | {info:?}");
+                debug!("IdentifyEvent:Received: {peer_id} | {info:?}");
                 {
                     let mut peers = node.peers.write().await;
                     peers.insert(peer_id, info.clone().listen_addrs);
@@ -372,13 +375,13 @@ impl P2PNode {
                     let agent_routing = swarm.behaviour_mut().register(&peer_id, addr.clone());
                     match agent_routing {
                         RoutingUpdate::Failed => {
-                            println!("IdentifyReceived: Failed to register address to Kademlia")
+                            warn!("IdentifyReceived: Failed to register address to Kademlia")
                         }
                         RoutingUpdate::Pending => {
-                            println!("IdentifyReceived: Register address pending")
+                            debug!("IdentifyReceived: Register address pending")
                         }
                         RoutingUpdate::Success => {
-                            println!("IdentifyReceived: {addr}: Success register address");
+                            debug!("IdentifyReceived: {addr}: Success register address");
                         }
                     }
 
@@ -386,7 +389,10 @@ impl P2PNode {
                 }
 
                 let mut peers = node.peers.read().await;
-                println!("Available peers: {:?}", peers.keys());
+                info!(
+                    "Available peers: {:?}",
+                    peers.keys().map(|p| p.to_base58()).collect::<Vec<_>>()
+                );
             }
             _ => {}
         }
@@ -405,7 +411,7 @@ impl P2PNode {
             node.protocol.clone(),
         );
 
-        println!("Handling incoming message on topic: {:?}", topic);
+        info!("Handling incoming message on topic: {:?}", topic);
 
         // Infer message type based on topic format
         if topic.is_broadcast() {
