@@ -322,17 +322,15 @@ impl P2PNode {
                     // 3. We're not the bootstrap node
                     if endpoint.is_dialer()
                         && !node.bootstrap_completed.load(Ordering::SeqCst){
-                        debug!("Starting bootstrap discovery process for first time");
                         if let Err(e) = P2PNode::handle_bootstrap_discovery(
                             node.clone(),
-                            peer_id,
-                            endpoint.get_remote_address()
+                            peer_id
                         ).await {
-                            debug!("Failed to initialize peer discovery: {}", e);
+                            info!("Failed to initialize peer discovery: {}", e);
                         } else {
                             // Mark bootstrap as completed
                             node.bootstrap_completed.store(true, Ordering::SeqCst);
-                            debug!("Bootstrap discovery process completed");
+                            info!("Bootstrap discovery process completed");
                         }
                     }
                 }
@@ -510,21 +508,23 @@ impl P2PNode {
     }
 
     /// Handles peer discovery after bootstrap connection
-    async fn handle_bootstrap_discovery(node: Arc<Self>, bootstrap_peer: PeerId, addr: &Multiaddr) -> Result<(), P2PError> {
+    async fn handle_bootstrap_discovery(node: Arc<Self>, bootstrap_peer: PeerId) -> Result<(), P2PError> {
 
-        info!("Adding bootstrap peer {} with address {} to DHT", bootstrap_peer, addr);
+        info!("Starting bootstrap discovery process");
 
-        // Announce ourselves first
+        // First announce ourselves as a provider
         node.announce_protocol().await?;
 
-        // Get closest peers to bootstrap
+        // Get closest peers to bootstrap peer
+        info!("Querying closest peers to bootstrap peer");
         let mut swarm = node.swarm.lock().await;
         swarm.behaviour_mut().get_closest_peers(bootstrap_peer);
 
-        // Actively search for other protocol providers
+        // Look for other protocol providers
+        info!("Searching for other protocol providers");
         let protocol_key = node.get_protocol_key();
         swarm.behaviour_mut().get_providers(protocol_key);
-
+        
         // Start periodic discovery
         let periodic_node = Arc::clone(&node);
         tokio::spawn(async move {
@@ -539,29 +539,7 @@ impl P2PNode {
                 interval.tick().await;
             }
         });
-
-        // Initial discovery from bootstrap peer
-        P2PNode::perform_bootstrap_discovery(&node, bootstrap_peer).await
-    }
-
-    /// Performs discovery starting from bootstrap peer
-    async fn perform_bootstrap_discovery(&self, bootstrap_peer: PeerId) -> Result<(), P2PError> {
-        info!("Starting bootstrap discovery process");
-
-        // First announce ourselves as a provider
-        self.announce_protocol().await?;
-
-        let mut swarm = self.swarm.lock().await;
-
-        // Get closest peers to bootstrap peer
-        info!("Querying closest peers to bootstrap peer");
-        swarm.behaviour_mut().get_closest_peers(bootstrap_peer);
-
-        // Look for other protocol providers
-        info!("Searching for other protocol providers");
-        let protocol_key = self.get_protocol_key();
-        swarm.behaviour_mut().get_providers(protocol_key);
-
+        
         Ok(())
     }
 
