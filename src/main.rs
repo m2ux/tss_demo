@@ -87,11 +87,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run in bootstrap mode (previously server mode)
-    Bootstrap {
-        /// Party ID for this node
-        #[arg(short, long)]
-        party_id: u16,
-    },
+    Bootstrap,
     /// Run in committee mode
     Committee {
         /// Party ID for this node
@@ -116,8 +112,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bootstrap_addresses = vec![format!("/ip4/127.0.0.1/tcp/{}", 8000)];
 
     match cli.command {
-        Command::Bootstrap { party_id } => {
-            run_bootstrap_mode(party_id, bootstrap_addresses).await?;
+        Command::Bootstrap => {
+            run_bootstrap_mode(bootstrap_addresses).await?;
         }
         Command::Committee { party_id } => {
             run_committee_mode(party_id, bootstrap_addresses).await?;
@@ -130,8 +126,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn run_bootstrap_mode(party_id: u16, addresses: Vec<String>) -> Result<(), Error> {
-    info!("Starting committee (bootstrap) mode. Party: {}", party_id);
+async fn run_bootstrap_mode(addresses: Vec<String>) -> Result<(), Error> {
+    info!("Starting bootstrap node");
     println!("Listening and advertising on: {:?}", addresses);
 
     let p2p_node = P2PNode::connect(None, addresses, "cggmp".to_string())
@@ -140,7 +136,7 @@ async fn run_bootstrap_mode(party_id: u16, addresses: Vec<String>) -> Result<(),
 
     // Create and run the service
     //let mut committee_protocol = committee::Protocol::new(party_id, p2p_node).await?;
-    tokio::time::sleep(Duration::from_secs(60)).await;
+    tokio::time::sleep(Duration::from_secs(600)).await;
     //committee_protocol.start().await
     Ok(())
 }
@@ -159,7 +155,7 @@ async fn run_committee_mode(party_id: u16, bootstrap_addresses: Vec<String>) -> 
 
     // Create and run the service
     //let mut committee_protocol = committee::Protocol::new(party_id, p2p_node).await?;
-    tokio::time::sleep(Duration::from_secs(60)).await;
+    tokio::time::sleep(Duration::from_secs(600)).await;
     //committee_protocol.start().await
     Ok(())
 }
