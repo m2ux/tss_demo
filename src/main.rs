@@ -145,9 +145,10 @@ async fn run_committee_mode(party_id: u16, bootstrap_addresses: Vec<String>) -> 
     println!("Starting committee mode. Party: {}", party_id);
     println!("Bootstrap addresses: {:?}", bootstrap_addresses);
 
+    let node_port = 10334 + party_id;
     let p2p_node = P2PNode::connect(
         Some(bootstrap_addresses),
-        vec![format!("/ip4/0.0.0.0/tcp/{}", 10334 + party_id)],
+        vec![format!("/ip4/127.0.0.1/tcp/{}", node_port)],
         "cggmp".to_string(),
     )
     .await

@@ -517,6 +517,7 @@ dependencies = [
  "libp2p-yamux",
  "log",
  "pot",
+ "rand",
  "rand_core",
  "rmp-serde",
  "round-based",
