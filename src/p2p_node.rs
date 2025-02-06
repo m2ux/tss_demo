@@ -297,12 +297,6 @@ impl P2PNode {
                             info!("Bootstrap discovery process completed");
                         }
                     }
-
-                    let peers = node.peers.read().await;
-                    info!(
-                        "Available peers: {:?}",
-                        peers.keys().map(|p| p.to_base58()).collect::<Vec<_>>()
-                    );
                 }
                 Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
                     info!("Connection closed with peer: {}", peer_id);
@@ -311,6 +305,10 @@ impl P2PNode {
                     let mut peers = node.peers.write().await;
                     if peers.remove(&peer_id).is_some() {
                         debug!("Removed disconnected peer {} from peers list", peer_id);
+                        info!(
+                            "Available peers: {:?}",
+                            peers.keys().map(|p| p.to_base58()).collect::<Vec<_>>()
+                        );
                     }
 
                     // Optionally, if you want to also remove from Kademlia DHT
@@ -325,12 +323,6 @@ impl P2PNode {
                             peer_id
                         );
                     }
-
-                    let peers = node.peers.read().await;
-                    info!(
-                        "Available peers: {:?}",
-                        peers.keys().map(|p| p.to_base58()).collect::<Vec<_>>()
-                    );
                 }
                 Some(SwarmEvent::NewListenAddr {
                     listener_id,
@@ -452,10 +444,18 @@ impl P2PNode {
                 Self::handle_incoming_message(&node, message.topic, message.data).await;
             }
             GossipEvent::Subscribed { peer_id, topic } => {
-                debug!("Peer {} subscribed to topic: {}", peer_id, topic.to_string());
+                debug!(
+                    "Peer {} subscribed to topic: {}",
+                    peer_id,
+                    topic.to_string()
+                );
             }
             GossipEvent::Unsubscribed { peer_id, topic } => {
-                debug!("Peer {} unsubscribed from topic: {}", peer_id, topic.to_string());
+                debug!(
+                    "Peer {} unsubscribed from topic: {}",
+                    peer_id,
+                    topic.to_string()
+                );
             }
             _ => {}
         }
@@ -480,7 +480,12 @@ impl P2PNode {
                 debug!("IdentifyEvent:Received: {peer_id} | {info:?}");
                 {
                     let mut peers = node.peers.write().await;
-                    peers.insert(peer_id, info.clone().listen_addrs);
+                    if peers.insert(peer_id, info.clone().listen_addrs).is_none() {
+                        info!(
+                            "Available peers: {:?}",
+                            peers.keys().map(|p| p.to_base58()).collect::<Vec<_>>()
+                        );
+                    }
                 }
 
                 for addr in info.clone().listen_addrs {
@@ -778,7 +783,8 @@ impl P2PNode {
     {
         debug!(
             "Publishing message to session {}, recipient: {}",
-            session_id, recipient.map_or("all".to_string(), |r| r.to_string())
+            session_id,
+            recipient.map_or("all".to_string(), |r| r.to_string())
         );
 
         // Serialize the network message
