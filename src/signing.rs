@@ -456,7 +456,7 @@ impl Protocol {
         // Get out party ID
         let party_id = sender.get_party_id();
         let mut delivery_handle: Option<
-            Result<WsDelivery<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>, Error>,
+            Result<P2PDelivery<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>, Error>,
         > = None;
 
         // Starting event
@@ -491,8 +491,8 @@ impl Protocol {
 
                     // Spawn delivery handler in a new task
                     delivery_handle = Some(
-                        WsDelivery::<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>::connect(
-                            "ws://localhost:8080",
+                        P2PDelivery::<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>::connect(
+                            Arc::clone(&self.p2p_node),
                             party_id,
                             CommitteeSession::SigningProtocol,
                         )
@@ -633,6 +633,9 @@ impl Protocol {
                                 }
                             }
                             tokio::time::sleep(Duration::from_millis((50 * party_id) as u64)).await;
+                        }
+                        else {
+                            println!("Couldn't take delivery handle");
                         }
                     }
                 }
@@ -897,7 +900,7 @@ async fn handle_signing_request(
     signing_parties: &[u16],
     storage: &KeyStorage,
     party_id: u16,
-    delivery: WsDelivery<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>,
+    delivery: P2PDelivery<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>,
 ) -> Result<Signature<Secp256k1>, Error> {
     println!("- Handling signing request from party ");
 

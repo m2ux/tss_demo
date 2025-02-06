@@ -175,7 +175,7 @@ pub async fn run_service_mode(
     let mut service = Service::new(party_id, p2p_node, message).await?;
     service.run().await?;
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
     println!("Signing request sent successfully");
     Ok(())
 }
