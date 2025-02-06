@@ -162,17 +162,17 @@ pub async fn run_service_mode(
     message: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting signing process for message: {}", message);
-    let party_id = 10;
+    let node_port = 10334 + 10;
     let p2p_node = P2PNode::connect(
         Some(bootstrap_addresses),
-        vec![format!("/ip4/0.0.0.0/tcp/{}", 10334 + party_id)],
+        vec![format!("/ip4/0.0.0.0/tcp/{}", node_port)],
         "cggmp".to_string(),
     )
     .await
     .map_err(|e| Error::Config(format!("Failed to initialize P2P node: {}", e)))?;
 
     tokio::time::sleep(Duration::from_secs(5)).await;
-    let mut service = Service::new(party_id, p2p_node, message).await?;
+    let mut service = Service::new(10, p2p_node).await?;
     service.run().await?;
 
     tokio::time::sleep(Duration::from_secs(2)).await;

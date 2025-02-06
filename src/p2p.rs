@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::{mpsc, mpsc::unbounded_channel};
-use log::{debug, info};
+use log::{debug, info, warn};
 
 /// Error types specific to P2P stream operations
 #[derive(Debug, thiserror::Error)]
