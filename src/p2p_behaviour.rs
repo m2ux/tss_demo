@@ -7,8 +7,8 @@ use libp2p::kad::{
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{gossipsub, identify, Multiaddr, PeerId};
 use libp2p_gossipsub::{Hasher, MessageId, PublishError, SubscriptionError, Topic, TopicHash};
-use libp2p_kad::{store, KBucketKey, QueryId, RecordKey};
 use libp2p_kad::store::MemoryStore;
+use libp2p_kad::{store, Addresses, EntryView, KBucketKey, PeerInfo, QueryId, RecordKey};
 
 #[derive(NetworkBehaviour)]
 #[behaviour(event_process = true)]
@@ -18,7 +18,7 @@ pub struct AgentBehaviour {
     kad: libp2p_kad::Behaviour<MemoryStore>,
 }
 
-impl AgentBehaviour  {
+impl AgentBehaviour {
     pub fn new(
         kad: KademliaBehavior<KademliaInMemory>,
         identify: IdentifyBehavior,
@@ -35,24 +35,29 @@ impl AgentBehaviour  {
         self.kad.add_address(peer_id, addr)
     }
 
+    pub fn remove_peer(
+        &mut self,
+        peer_id: &PeerId,
+    ) -> Option<EntryView<KBucketKey<PeerId>, Addresses>> {
+        self.kad.remove_peer(peer_id)
+    }
+
     pub fn get_closest_peers<K>(&mut self, key: K) -> QueryId
     where
         K: Into<Vec<u8>> + Clone,
-        KBucketKey<K>: From<K>
+        KBucketKey<K>: From<K>,
     {
         self.kad.get_closest_peers(key)
     }
 
-    pub fn start_providing(&mut self, key: RecordKey) -> Result<QueryId, store::Error> 
-    {
+    pub fn start_providing(&mut self, key: RecordKey) -> Result<QueryId, store::Error> {
         self.kad.start_providing(key)
     }
 
-    pub fn get_providers(&mut self, key: RecordKey) -> QueryId
-    {
+    pub fn get_providers(&mut self, key: RecordKey) -> QueryId {
         self.kad.get_providers(key)
     }
-    
+
     pub fn set_server_mode(&mut self) {
         self.kad.set_mode(Some(libp2p::kad::Mode::Server))
     }

@@ -23,17 +23,17 @@ use libp2p_gossipsub as gossipsub;
 use libp2p_gossipsub::{Behaviour, Event as GossipEvent, Event, IdentTopic, TopicHash};
 use libp2p_identity::{self, Keypair, PeerId};
 use libp2p_kad::store::MemoryStore;
+use libp2p_kad::{GetProvidersOk, QueryResult, RecordKey};
 use libp2p_swarm::{NetworkBehaviour, SwarmEvent};
 use log::{debug, info, warn};
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
-use std::sync::atomic::{AtomicBool, Ordering};
-use libp2p_kad::{GetProvidersOk, QueryResult, RecordKey};
-use rand::seq::SliceRandom;
-use sha2::Digest;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 /// Message type (broadcast or p2p)
@@ -106,7 +106,6 @@ pub struct P2PNode {
 const CGGMP_KAD_PROTOCOL: &'static str = "/cggmp/kad/1.0.0";
 
 impl P2PNode {
-
     /// Constants for peer discovery
     const DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
     const INITIAL_DISCOVERY_DELAY: Duration = Duration::from_secs(5);
@@ -207,7 +206,9 @@ impl P2PNode {
 
         // Start periodic protocol announcements if we're not a bootstrap node
         if !config.is_bootstrap_node {
-            Arc::clone(&Arc::clone(&node)).start_protocol_announcements().await;
+            Arc::clone(&Arc::clone(&node))
+                .start_protocol_announcements()
+                .await;
         }
 
         Ok(node)
@@ -310,22 +311,21 @@ impl P2PNode {
                     P2PNode::handle_kadelia_event(Arc::clone(&node), event).await;
                 }
                 Some(SwarmEvent::ConnectionEstablished {
-                         peer_id,
-                         endpoint,
-                         ..
-                     }) => {
-                    debug!("Connection established with peer: {}. {:?}", peer_id, endpoint);
+                    peer_id, endpoint, ..
+                }) => {
+                    debug!(
+                        "Connection established with peer: {}. {:?}",
+                        peer_id, endpoint
+                    );
 
                     // Only proceed with bootstrap discovery if:
                     // 1. This is an outbound connection (we initiated it)
                     // 2. We haven't completed bootstrap before
                     // 3. We're not the bootstrap node
-                    if endpoint.is_dialer()
-                        && !node.bootstrap_completed.load(Ordering::SeqCst){
-                        if let Err(e) = P2PNode::handle_bootstrap_discovery(
-                            node.clone(),
-                            peer_id
-                        ).await {
+                    if endpoint.is_dialer() && !node.bootstrap_completed.load(Ordering::SeqCst) {
+                        if let Err(e) =
+                            P2PNode::handle_bootstrap_discovery(node.clone(), peer_id).await
+                        {
                             info!("Failed to initialize peer discovery: {}", e);
                         } else {
                             // Mark bootstrap as completed
@@ -334,10 +334,27 @@ impl P2PNode {
                         }
                     }
                 }
-                Some(SwarmEvent::ConnectionClosed {
-                    peer_id, endpoint, ..
-                }) => {
-                    info!("Connection closed with peer: {}: {:?}", peer_id, endpoint);
+                Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
+                    info!("Connection closed with peer: {}", peer_id);
+
+                    // Remove peer from our peers list
+                    let mut peers = node.peers.write().await;
+                    if peers.remove(&peer_id).is_some() {
+                        info!("Removed disconnected peer {} from peers list", peer_id);
+                    }
+
+                    // Optionally, if you want to also remove from Kademlia DHT
+                    let mut swarm = node.swarm.lock().await;
+                    swarm.behaviour_mut().remove_peer(&peer_id);
+
+                    // If this was the bootstrap peer and we haven't completed bootstrap,
+                    // we might want to log that
+                    if !node.bootstrap_completed.load(Ordering::SeqCst) {
+                        warn!(
+                            "Connection to peer {} closed before bootstrap completion",
+                            peer_id
+                        );
+                    }
                 }
                 Some(SwarmEvent::NewListenAddr {
                     listener_id,
@@ -391,9 +408,15 @@ impl P2PNode {
                             // Try to connect to the peer using its provided addresses
                             for addr in peer_info.addrs {
                                 if let Err(e) = swarm.dial(addr.clone()) {
-                                    debug!("Failed to dial discovered peer {}: {}", peer_info.peer_id, e);
+                                    debug!(
+                                        "Failed to dial discovered peer {}: {}",
+                                        peer_info.peer_id, e
+                                    );
                                 } else {
-                                    debug!("Successfully dialing peer {} at {}", peer_info.peer_id, addr);
+                                    debug!(
+                                        "Successfully dialing peer {} at {}",
+                                        peer_info.peer_id, addr
+                                    );
                                 }
                             }
                         }
@@ -415,14 +438,20 @@ impl P2PNode {
                                 }
                             }
                             GetProvidersOk::FinishedWithNoAdditionalRecord { closest_peers } => {
-                                debug!("No providers found, but got {} closest peers", closest_peers.len());
+                                debug!(
+                                    "No providers found, but got {} closest peers",
+                                    closest_peers.len()
+                                );
                                 // Try to connect to closest peers as they might be useful for future queries
                                 for peer in closest_peers {
                                     let mut swarm = node.swarm.lock().await;
                                     if let Some(addrs) = node.peers.read().await.get(&peer) {
                                         for addr in addrs {
                                             if let Err(e) = swarm.dial(addr.clone()) {
-                                                debug!("Failed to dial closest peer {}: {}", peer, e);
+                                                debug!(
+                                                    "Failed to dial closest peer {}: {}",
+                                                    peer, e
+                                                );
                                             }
                                         }
                                     }
@@ -508,8 +537,10 @@ impl P2PNode {
     }
 
     /// Handles peer discovery after bootstrap connection
-    async fn handle_bootstrap_discovery(node: Arc<Self>, bootstrap_peer: PeerId) -> Result<(), P2PError> {
-
+    async fn handle_bootstrap_discovery(
+        node: Arc<Self>,
+        bootstrap_peer: PeerId,
+    ) -> Result<(), P2PError> {
         info!("Starting bootstrap discovery process");
 
         // First announce ourselves as a provider
@@ -524,7 +555,7 @@ impl P2PNode {
         info!("Searching for other protocol providers");
         let protocol_key = node.get_protocol_key();
         swarm.behaviour_mut().get_providers(protocol_key);
-        
+
         // Start periodic discovery
         let periodic_node = Arc::clone(&node);
         tokio::spawn(async move {
@@ -539,20 +570,17 @@ impl P2PNode {
                 interval.tick().await;
             }
         });
-        
+
         Ok(())
     }
 
     /// Performs a discovery cycle
     async fn perform_discovery(&self) -> Result<(), P2PError> {
-
         // Get current peers for discovery
-        let peers: Vec<PeerId> = self.peers.read().await
-            .keys()
-            .cloned()
-            .collect();
+        let peers: Vec<PeerId> = self.peers.read().await.keys().cloned().collect();
 
         let mut swarm = self.swarm.lock().await;
+
         // Query random peers to expand network view
         for peer_id in peers.choose_multiple(&mut rand::thread_rng(), 3) {
             swarm.behaviour_mut().get_closest_peers(*peer_id);
@@ -579,10 +607,16 @@ impl P2PNode {
                     if let Ok(mut swarm) = node.swarm.try_lock() {
                         match swarm.behaviour_mut().start_providing(protocol_key) {
                             Ok(query_id) => {
-                                debug!("Successfully announced as protocol provider: {:?}", query_id);
+                                debug!(
+                                    "Successfully announced as protocol provider: {:?}",
+                                    query_id
+                                );
                                 Ok(())
                             }
-                            Err(e) => Err(P2PError::Protocol(format!("Failed to start providing: {}", e)))
+                            Err(e) => Err(P2PError::Protocol(format!(
+                                "Failed to start providing: {}",
+                                e
+                            ))),
                         }
                     } else {
                         Ok(()) // Don't treat lock contention as an error
@@ -590,7 +624,10 @@ impl P2PNode {
                 };
 
                 // Use timeout for tick to prevent permanent blocking
-                if tokio::time::timeout(Duration::from_secs(5), interval.tick()).await.is_err() {
+                if tokio::time::timeout(Duration::from_secs(5), interval.tick())
+                    .await
+                    .is_err()
+                {
                     debug!("Interval tick timed out");
                 }
             }
@@ -602,26 +639,31 @@ impl P2PNode {
         let protocol_key = self.get_protocol_key();
 
         // Use try_lock with timeout to prevent deadlock
-        let mut swarm = tokio::time::timeout(
-            Duration::from_secs(5),
-            self.swarm.lock()
-        ).await.map_err(|_| P2PError::Protocol("Swarm lock timeout".into()))?;
+        let mut swarm = tokio::time::timeout(Duration::from_secs(5), self.swarm.lock())
+            .await
+            .map_err(|_| P2PError::Protocol("Swarm lock timeout".into()))?;
 
         // Scope the lock usage
         let result = swarm.behaviour_mut().start_providing(protocol_key);
 
         match result {
             Ok(query_id) => {
-                debug!("Successfully announced as protocol provider: {:?}", query_id);
+                debug!(
+                    "Successfully announced as protocol provider: {:?}",
+                    query_id
+                );
                 Ok(())
             }
-            Err(e) => Err(P2PError::Protocol(format!("Failed to start providing: {}", e)))
+            Err(e) => Err(P2PError::Protocol(format!(
+                "Failed to start providing: {}",
+                e
+            ))),
         }
     }
 
     /// Generates a protocol-specific key for discovery
     fn get_protocol_key(&self) -> RecordKey {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(self.protocol.as_bytes());
         RecordKey::new(&hasher.finalize())
