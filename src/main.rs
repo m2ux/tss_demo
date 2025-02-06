@@ -130,14 +130,11 @@ async fn run_bootstrap_mode(addresses: Vec<String>) -> Result<(), Error> {
     info!("Starting bootstrap node");
     println!("Listening and advertising on: {:?}", addresses);
 
-    let p2p_node = P2PNode::connect(None, addresses, "cggmp".to_string())
+    let _ = P2PNode::connect(None, addresses, "cggmp".to_string())
         .await
         .map_err(|e| Error::Config(format!("Failed to initialize P2P node: {}", e)))?;
 
-    // Create and run the service
-    //let mut committee_protocol = committee::Protocol::new(party_id, p2p_node).await?;
     tokio::time::sleep(Duration::from_secs(600)).await;
-    //committee_protocol.start().await
     Ok(())
 }
 
@@ -155,10 +152,9 @@ async fn run_committee_mode(party_id: u16, bootstrap_addresses: Vec<String>) -> 
     .map_err(|e| Error::Config(format!("Failed to initialize P2P node: {}", e)))?;
 
     // Create and run the service
-    //let mut committee_protocol = committee::Protocol::new(party_id, p2p_node).await?;
-    tokio::time::sleep(Duration::from_secs(600)).await;
-    //committee_protocol.start().await
-    Ok(())
+    let mut committee_protocol = committee::Protocol::new(party_id, p2p_node).await?;
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    committee_protocol.start().await
 }
 
 pub async fn run_service_mode(
@@ -175,10 +171,11 @@ pub async fn run_service_mode(
     .await
     .map_err(|e| Error::Config(format!("Failed to initialize P2P node: {}", e)))?;
 
+    tokio::time::sleep(Duration::from_secs(5)).await;
     let mut service = Service::new(party_id, p2p_node, message).await?;
     service.run().await?;
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     println!("Signing request sent successfully");
     Ok(())
 }

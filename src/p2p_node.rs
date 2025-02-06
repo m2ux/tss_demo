@@ -107,7 +107,7 @@ const CGGMP_KAD_PROTOCOL: &'static str = "/cggmp/kad/1.0.0";
 
 impl P2PNode {
     /// Constants for peer discovery
-    const DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
+    const DISCOVERY_INTERVAL: Duration = Duration::from_secs(600);
     const INITIAL_DISCOVERY_DELAY: Duration = Duration::from_secs(5);
     const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -124,7 +124,7 @@ impl P2PNode {
             .map_err(|e| P2PError::Protocol(e.to_string()))?
             .with_behaviour(|key| {
                 let local_peer_id = PeerId::from(key.clone().public());
-                println!("LocalPeerID: {local_peer_id}");
+                println!("Local peer ID: {local_peer_id}");
 
                 // Set up the Kademlia behavior for peer discovery.
                 let mut kad_config = KadConfig::new(kad_protocol);
@@ -144,6 +144,7 @@ impl P2PNode {
 
                 // Create gossipsub configuration
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
+                    .max_transmit_size(262144) // 256KB
                     .protocol_id_prefix(format!("/{}/gossip/1.0", config.protocol))
                     .heartbeat_interval(Duration::from_secs(1))
                     .validation_mode(gossipsub::ValidationMode::Strict)
@@ -174,10 +175,6 @@ impl P2PNode {
 
         // Regular nodes connect to bootstrap peers
         if !config.is_bootstrap_node {
-            //swarm
-            //    .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
-            //    .unwrap();
-
             for addr in config.bootstrap_peers {
                 swarm
                     .dial(addr.clone())
@@ -214,34 +211,6 @@ impl P2PNode {
         Ok(node)
     }
 
-    pub async fn print_diagnostics(&self) {
-        let swarm = self.swarm.lock().await;
-        info!("🔍 P2P Node Diagnostics:");
-        info!("📍 Local peer ID: {}", swarm.local_peer_id());
-
-        // Print listen addresses
-        info!("🎧 Listen addresses:");
-        for addr in swarm.listeners() {
-            info!("   - {}", addr);
-        }
-
-        // Print connected peers
-        info!("🔗 Connected peers:");
-        for peer in swarm.connected_peers() {
-            info!("   - {}", peer);
-        }
-
-        // Print known peers from DHT
-        info!("📚 Known peers in DHT:");
-        let peers = self.peers.read().await;
-        for (peer_id, addrs) in peers.iter() {
-            info!("   - {} at addresses:", peer_id);
-            for addr in addrs {
-                info!("     * {}", addr);
-            }
-        }
-    }
-
     /// Creates a new P2P node connection with production configuration
     pub async fn connect(
         bootstrap_addresses: Option<Vec<String>>,
@@ -251,11 +220,6 @@ impl P2PNode {
         let is_bootstrap_node = bootstrap_addresses.is_none();
 
         info!("Initializing P2P node:");
-        info!("Bootstrap mode: {}", is_bootstrap_node);
-        info!("Listen addresses: {:?}", listen_addresses);
-        if let Some(ref bootstrap) = bootstrap_addresses {
-            info!("Bootstrap addresses: {:?}", bootstrap);
-        }
 
         // Parse listening addresses
         let listen_multiaddrs = listen_addresses
@@ -333,6 +297,12 @@ impl P2PNode {
                             info!("Bootstrap discovery process completed");
                         }
                     }
+
+                    let peers = node.peers.read().await;
+                    info!(
+                        "Available peers: {:?}",
+                        peers.keys().map(|p| p.to_base58()).collect::<Vec<_>>()
+                    );
                 }
                 Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
                     info!("Connection closed with peer: {}", peer_id);
@@ -340,7 +310,7 @@ impl P2PNode {
                     // Remove peer from our peers list
                     let mut peers = node.peers.write().await;
                     if peers.remove(&peer_id).is_some() {
-                        info!("Removed disconnected peer {} from peers list", peer_id);
+                        debug!("Removed disconnected peer {} from peers list", peer_id);
                     }
 
                     // Optionally, if you want to also remove from Kademlia DHT
@@ -355,6 +325,12 @@ impl P2PNode {
                             peer_id
                         );
                     }
+
+                    let peers = node.peers.read().await;
+                    info!(
+                        "Available peers: {:?}",
+                        peers.keys().map(|p| p.to_base58()).collect::<Vec<_>>()
+                    );
                 }
                 Some(SwarmEvent::NewListenAddr {
                     listener_id,
@@ -473,14 +449,13 @@ impl P2PNode {
                 message_id,
                 message,
             } => {
-                info!("Message {} received", message_id);
                 Self::handle_incoming_message(&node, message.topic, message.data).await;
             }
             GossipEvent::Subscribed { peer_id, topic } => {
-                info!("Peer {} subscribed to topic {:?}", peer_id, topic);
+                debug!("Peer {} subscribed to topic: {}", peer_id, topic.to_string());
             }
             GossipEvent::Unsubscribed { peer_id, topic } => {
-                info!("Peer {} unsubscribed from topic {:?}", peer_id, topic);
+                debug!("Peer {} unsubscribed from topic: {}", peer_id, topic.to_string());
             }
             _ => {}
         }
@@ -525,12 +500,6 @@ impl P2PNode {
 
                     _ = swarm.behaviour_mut().register(&peer_id, addr.clone());
                 }
-
-                let mut peers = node.peers.read().await;
-                info!(
-                    "Available peers: {:?}",
-                    peers.keys().map(|p| p.to_base58()).collect::<Vec<_>>()
-                );
             }
             _ => {}
         }
@@ -682,18 +651,13 @@ impl P2PNode {
             node.protocol.clone(),
         );
 
-        info!("Handling incoming message on topic: {:?}", topic);
+        debug!("Incoming message on topic: {}", topic.inner.hash());
 
         // Infer message type based on topic format
         if topic.is_broadcast() {
             // Broadcast message - forward to all sessions with matching session_id
-            if let Some(session_id) = topic.session_id() {
-                // Forward the network message
-                for session in sessions.values() {
-                    if session.session_id == session_id {
-                        session.forward_message(data.clone());
-                    }
-                }
+            if let Some(session) = sessions.get(&topic.hash()) {
+                session.forward_message(data);
             }
         } else if topic.is_p2p() {
             // P2P message - forward only to the specific session matching the topic
@@ -812,7 +776,10 @@ impl P2PNode {
     where
         M: Serialize + Send + 'static,
     {
-        println!("Publishing message to recipient: {:?}", recipient);
+        debug!(
+            "Publishing message to session {}, recipient: {}",
+            session_id, recipient.map_or("all".to_string(), |r| r.to_string())
+        );
 
         // Serialize the network message
         let msg_data = bincode::serialize(&data).map_err(|e| {

@@ -7,6 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::{mpsc, mpsc::unbounded_channel};
+use log::{debug, info};
 
 /// Error types specific to P2P stream operations
 #[derive(Debug, thiserror::Error)]
@@ -22,7 +23,6 @@ pub enum P2PStreamError {
 pub struct P2PMessageStream {
     node: Arc<P2PNode>,
     to_network_receiver: mpsc::UnboundedReceiver<NetworkMessage>,
-    from_node_sender: mpsc::UnboundedSender<Vec<u8>>,
     to_node_sender: mpsc::UnboundedSender<NetworkMessage>,
     party_id: u16,
     session_id: u16,
@@ -63,11 +63,26 @@ impl P2PMessageStream {
         tokio::spawn(async move {
             while let Some(msg) = to_node_receiver.recv().await {
                 if let NetworkMessage::WireMessage(wire_msg) = msg {
-                    if let Err(e) = node_clone
-                        .publish_message(&wire_msg, wire_msg.receiver, session_id)
-                        .await
-                    {
-                        println!("Error publishing message: {}", e);
+                    let mut retry_count = 0;
+                    const MAX_RETRIES: u32 = 3;
+                    const RETRY_DELAY_MS: u64 = 1000;
+
+                    loop {
+                        match node_clone
+                            .publish_message(&wire_msg, wire_msg.receiver, session_id)
+                            .await
+                        {
+                            Ok(_) => break,
+                            Err(e) => {
+                                if retry_count >= MAX_RETRIES {
+                                    info!("Failed to publish message after {} retries: {}", MAX_RETRIES, e);
+                                    break;
+                                }
+                                debug!("Error publishing message (attempt {}): {}", retry_count + 1, e);
+                                retry_count += 1;
+                                tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+                            }
+                        }
                     }
                 }
             }
@@ -76,7 +91,6 @@ impl P2PMessageStream {
         Ok(Self {
             node,
             to_network_receiver,
-            from_node_sender,
             to_node_sender,
             party_id,
             session_id,

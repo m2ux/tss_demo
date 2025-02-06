@@ -312,7 +312,7 @@ impl Protocol {
             match committee_state {
                 CommitteeState::AwaitingMembers => {
                     if context.deadline.is_none() {
-                        context.set_deadline(Duration::from_secs(5));
+                        context.set_deadline(Duration::from_secs(15));
                     }
 
                     if context.is_deadline_elapsed() {
@@ -331,7 +331,7 @@ impl Protocol {
                             .broadcast(ControlMessage::CommitteeMemberAnnouncement)
                             .await?;
 
-                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
 
@@ -345,7 +345,6 @@ impl Protocol {
 
                         let execution_id = context.execution_id_coord.proposed_id.clone().unwrap();
                         println!("Proposing execution ID: {}", &execution_id);
-
                         sender
                             .broadcast(ControlMessage::ExecutionIdProposal { execution_id })
                             .await
@@ -361,6 +360,7 @@ impl Protocol {
                                 context.execution_id_coord.approve(party_id);
                                 let execution_id =
                                     context.execution_id_coord.proposed_id.clone().unwrap();
+                                println!("Accepted execution ID proposal from {}", proposer);
                                 sender
                                     .broadcast(ControlMessage::ExecutionIdAccept { execution_id })
                                     .await
@@ -399,8 +399,7 @@ impl Protocol {
                     )
                     .await?;
                     self.storage.save("aux_info", &aux_info)?;
-
-                    tokio::time::sleep(Duration::from_millis((50 * party_id) as u64)).await;
+                    
                     sender
                         .broadcast(ControlMessage::AuxInfoReady)
                         .await
@@ -470,6 +469,7 @@ impl Protocol {
                     committee_state = CommitteeState::AwaitingMembers;
                 }
             }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
