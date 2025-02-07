@@ -475,7 +475,8 @@ impl Protocol {
                 }
 
                 (fsm::State::Idle, Some(Input::Starting)) => {
-                    println!("Committee ready for signing operations.");
+                    let peer_id = self.p2p_node.peer_id();
+                    println!("Ready for signing operations as party {party_id} [{peer_id}]");
                 }
 
                 (fsm::State::Idle, Some(Input::SignRequestReceived)) => {
@@ -689,6 +690,7 @@ impl Protocol {
                     }
                 }
             }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 }

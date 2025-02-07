@@ -360,7 +360,7 @@ impl Protocol {
                                 context.execution_id_coord.approve(party_id);
                                 let execution_id =
                                     context.execution_id_coord.proposed_id.clone().unwrap();
-                                println!("Accepted execution ID proposal from {}", proposer);
+                                println!("Accepted execution ID proposal from party {}", proposer);
                                 sender
                                     .broadcast(ControlMessage::ExecutionIdAccept { execution_id })
                                     .await

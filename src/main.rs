@@ -69,17 +69,41 @@ mod websocket;
 use crate::error::Error;
 use crate::p2p_node::P2PNode;
 use crate::service::Service;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use env_logger::{Builder, Env};
-use futures_util::TryFutureExt;
-use libp2p::Multiaddr;
 use log::info;
-use std::str::FromStr;
+use log::LevelFilter;
 use std::time::Duration;
+
+#[derive(Clone, ValueEnum)]
+enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+// Implementation to convert LogLevel to LevelFilter
+impl LogLevel {
+    fn to_level_filter(self) -> LevelFilter {
+        match self {
+            LogLevel::Error => LevelFilter::Error,
+            LogLevel::Warn => LevelFilter::Warn,
+            LogLevel::Info => LevelFilter::Info,
+            LogLevel::Debug => LevelFilter::Debug,
+            LogLevel::Trace => LevelFilter::Trace,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    /// Set the log level (default: info)
+    #[arg(short, long, value_enum, default_value = "info")]
+    log_level: LogLevel,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -95,18 +119,16 @@ enum Command {
         party_id: u16,
     },
     /// Run in service mode
-    Service {
-        /// Message to be signed (initiates signing mode)
-        #[arg(short, long)]
-        message: String,
-    },
+    Service,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize env_logger
-    Builder::from_env(Env::default().default_filter_or("info")).init();
     let cli = Cli::parse();
+
+    Builder::from_env(Env::default().default_filter_or("info"))
+        .filter_level(cli.log_level.to_level_filter())
+        .init();
 
     // Fixed bootstrap addresses
     let bootstrap_addresses = vec![format!("/ip4/127.0.0.1/tcp/{}", 8000)];
@@ -118,8 +140,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Committee { party_id } => {
             run_committee_mode(party_id, bootstrap_addresses).await?;
         }
-        Command::Service { message } => {
-            run_service_mode(bootstrap_addresses, message).await?;
+        Command::Service => {
+            run_service_mode(bootstrap_addresses).await?;
         }
     }
 
@@ -128,13 +150,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run_bootstrap_mode(addresses: Vec<String>) -> Result<(), Error> {
     info!("Starting bootstrap node");
-    println!("Listening and advertising on: {:?}", addresses);
+    info!("Listening and advertising on: {:?}", addresses);
 
     let _ = P2PNode::connect(None, addresses, "cggmp".to_string())
         .await
         .map_err(|e| Error::Config(format!("Failed to initialize P2P node: {}", e)))?;
 
-    tokio::time::sleep(Duration::from_secs(600)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    info!("Bootstrap complete");
     Ok(())
 }
 
@@ -159,9 +182,8 @@ async fn run_committee_mode(party_id: u16, bootstrap_addresses: Vec<String>) -> 
 
 pub async fn run_service_mode(
     bootstrap_addresses: Vec<String>,
-    message: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting signing process for message: {}", message);
+    println!("Starting signing process");
     let node_port = 10334 + 10;
     let p2p_node = P2PNode::connect(
         Some(bootstrap_addresses),

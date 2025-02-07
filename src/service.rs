@@ -233,7 +233,7 @@ impl Service {
 
             // Prevent tight loop
             drop(context);
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 }

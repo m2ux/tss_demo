@@ -277,9 +277,9 @@ impl P2PNode {
                 Some(SwarmEvent::ConnectionEstablished {
                     peer_id, endpoint, ..
                 }) => {
-                    debug!(
-                        "Connection established with peer: {}. {:?}",
-                        peer_id, endpoint
+                    info!(
+                        "Connection established with peer: {}",
+                        peer_id
                     );
 
                     // Only proceed with bootstrap discovery if:
@@ -305,7 +305,7 @@ impl P2PNode {
                     let mut peers = node.peers.write().await;
                     if peers.remove(&peer_id).is_some() {
                         debug!("Removed disconnected peer {} from peers list", peer_id);
-                        info!(
+                        debug!(
                             "Available peers: {:?}",
                             peers.keys().map(|p| p.to_base58()).collect::<Vec<_>>()
                         );
@@ -318,7 +318,7 @@ impl P2PNode {
                     // If this was the bootstrap peer and we haven't completed bootstrap,
                     // we might want to log that
                     if !node.bootstrap_completed.load(Ordering::SeqCst) {
-                        warn!(
+                        debug!(
                             "Connection to peer {} closed before bootstrap completion",
                             peer_id
                         );
@@ -357,6 +357,11 @@ impl P2PNode {
         Ok(())
     }
 
+    /// Returns the PeerId of this node
+    pub fn peer_id(&self) -> PeerId {
+        PeerId::from(self.keypair.public())
+    }
+    
     pub async fn handle_kadelia_event(node: Arc<Self>, event: KadEvent) {
         match event {
             KadEvent::RoutablePeer { peer, address } => {
@@ -481,7 +486,7 @@ impl P2PNode {
                 {
                     let mut peers = node.peers.write().await;
                     if peers.insert(peer_id, info.clone().listen_addrs).is_none() {
-                        info!(
+                        debug!(
                             "Available peers: {:?}",
                             peers.keys().map(|p| p.to_base58()).collect::<Vec<_>>()
                         );
