@@ -60,6 +60,57 @@ This project implements the CGGMP21 protocol for distributed threshold signing o
     - Lowest 3 party IDs selected as signers
     - Signers generate and verify threshold signature
 
+## Known Weaknesses
+
+The current implementation has several known weaknesses and limitations that should be addressed before considering 
+this ready for anything more than basic demonstration use:
+
+- **Timing Attack Vulnerability**
+    - In signing.rs, signature verification uses non-constant-time comparison
+    - Potential timing side-channel during signature share verification
+    - Currently compares signatures using standard equality checks
+
+- **State Transition Issues**
+    - Some state transitions lack proper error handling in signing protocol
+    - Committee state machine lacks recovery mechanisms for interrupted sessions
+    - No automatic retry for failed state transitions
+
+- **Network Security**
+    - Bootstrap node becomes a single point of failure
+    - No validation of bootstrap node identity
+    - Peer discovery relies on trusted bootstrap nodes
+    - No blacklisting mechanism for misbehaving peers (aka Identifiable Abort)
+
+- **Protocol Limitations**
+    - Fixed 5-second collection window may be inappropriate for some network conditions
+    - Deterministic signer selection (lowest 3 IDs) could be gamed by malicious parties
+    - No dynamic adjustment of threshold parameters
+    - No support for party removal/addition after committee formation
+
+- **Security Implementation**
+    - Fixed nonce ("unique nonce") used in storage encryption
+    - No secure key erasure from memory after operations
+    - Limited protection against message replay attacks
+    - No rate limiting for message broadcasts
+
+- **Error Recovery**
+    - Limited recovery mechanisms for network partitions
+    - No automatic reconnection strategy for dropped peers
+    - Incomplete cleanup of resources in some error cases
+    - No persistent state recovery across restarts
+
+- **Missing Features**
+    - No member replacement protocol
+    - No support for concurrent signing sessions
+    - Limited monitoring and metrics collection
+    - No persistent logging of protocol events
+
+- **Performance Considerations**
+    - Unbounded message queues could lead to memory issues
+    - No backpressure mechanisms in P2P communication
+    - GossipSub mesh might not scale efficiently with large number of parties
+    - No message batching for network optimization
+
 ## Technical Requirements
 
 - Rust (latest stable version)
