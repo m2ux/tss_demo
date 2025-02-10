@@ -16,10 +16,10 @@
 //! * Dynamic signer discovery and committee formation
 //! * Distributed key generation (t-of-n threshold scheme)
 //! * Multi-round threshold signing operations
-//! * Secure WebSocket communication with reliable broadcast
+//! * Secure P2P communication with reliable broadcast
 //! * Encrypted persistent storage of key shares
 //! * Automatic quorum formation for signing operations
-//! * WebSocket server functionality for message relaying
+//! * P2P node functionality for message routing
 //!
 //! # Security Properties
 //!
@@ -28,26 +28,9 @@
 //! * Secure against network adversaries
 //! * Protected key share storage
 //!
-//! # Usage
-//!
-//! Start as a committee member:
-//! ```bash
-//! cggmp21-demo --committee --party-id 1 --server "ws://localhost:8080"
-//! ```
-//!
-//! Initiate signing operation:
-//! ```bash
-//! cggmp21-demo --message "Message to sign" --party-id 2 --server "ws://localhost:8080"
-//! ```
-//!
-//! Run as a WebSocket server:
-//! ```bash
-//! cggmp21-demo --server-mode --server "localhost:8080"
-//! ```
-//!
 //! # Protocol Parameters
 //!
-//! * Minimum committee size: 5 parties
+//! * Minimum committee size: 3 parties
 //! * Signing threshold: 3 parties
 //! * Security level: 128 bits
 //! * Curve: secp256k1
@@ -75,6 +58,7 @@ use log::info;
 use log::LevelFilter;
 use std::time::Duration;
 
+/// Enumeration of available log levels for the application
 #[derive(Clone, ValueEnum)]
 enum LogLevel {
     Error,
@@ -86,6 +70,10 @@ enum LogLevel {
 
 // Implementation to convert LogLevel to LevelFilter
 impl LogLevel {
+    /// Converts LogLevel to env_logger's LevelFilter
+    ///
+    /// # Returns
+    /// The corresponding LevelFilter for env_logger configuration
     fn to_level_filter(self) -> LevelFilter {
         match self {
             LogLevel::Error => LevelFilter::Error,
@@ -97,6 +85,7 @@ impl LogLevel {
     }
 }
 
+/// Command line interface configuration using clap
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -104,24 +93,40 @@ struct Cli {
     #[arg(short, long, value_enum, default_value = "info")]
     log_level: LogLevel,
 
+    /// Subcommand for different operation modes
     #[command(subcommand)]
     command: Command,
 }
 
+/// Available operation modes for the application
 #[derive(Subcommand)]
 enum Command {
-    /// Run in bootstrap mode (previously server mode)
+    /// Run in bootstrap mode for P2P network initialization
     Bootstrap,
-    /// Run in committee mode
+
+    /// Run in committee mode as a signing participant
     Committee {
-        /// Party ID for this node
+        /// Party ID for this node (used in protocol operations)
         #[arg(short, long)]
         party_id: u16,
     },
-    /// Run in service mode
+
+    /// Run in service mode for requesting signatures
     Service,
 }
 
+/// Main entry point for the CGGMP21 demo application
+///
+/// Initializes logging, parses command line arguments, and starts
+/// the appropriate operation mode based on user input.
+///
+/// # P2P Network Configuration
+/// - Bootstrap node listens on port 8000
+/// - Committee members use ports starting at 10334 + party_id
+/// - Service node uses port 10344
+///
+/// # Returns
+/// Result indicating success or error during execution
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -148,6 +153,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Runs the application in bootstrap mode
+///
+/// Starts a bootstrap node that provides initial peer discovery for the P2P network.
+/// This node maintains a list of active peers and helps new nodes join the network.
+///
+/// # Arguments
+/// * `addresses` - List of addresses the bootstrap node should listen on
+///
+/// # Implementation Details
+/// - Listens on specified addresses
+/// - Maintains DHT for peer discovery
+/// - Runs for 20 seconds to allow peer connections
+///
+/// # Returns
+/// Result indicating success or error during bootstrap operation
 async fn run_bootstrap_mode(addresses: Vec<String>) -> Result<(), Error> {
     info!("Starting bootstrap node");
     info!("Listening and advertising on: {:?}", addresses);
@@ -161,6 +181,23 @@ async fn run_bootstrap_mode(addresses: Vec<String>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Runs the application in committee mode
+///
+/// Starts a committee member node that participates in the distributed
+/// signing protocol using P2P communication.
+///
+/// # Arguments
+/// * `party_id` - Unique identifier for this committee member
+/// * `bootstrap_addresses` - Addresses of bootstrap nodes for P2P network discovery
+///
+/// # Implementation Details
+/// - Connects to bootstrap nodes
+/// - Establishes P2P connections with other committee members
+/// - Participates in distributed key generation and signing
+/// - Uses port 10334 + party_id for P2P communication
+///
+/// # Returns
+/// Result indicating success or error during committee operation
 async fn run_committee_mode(party_id: u16, bootstrap_addresses: Vec<String>) -> Result<(), Error> {
     println!("Starting committee mode. Party: {}", party_id);
     println!("Bootstrap addresses: {:?}", bootstrap_addresses);
@@ -180,6 +217,22 @@ async fn run_committee_mode(party_id: u16, bootstrap_addresses: Vec<String>) -> 
     committee_protocol.start().await
 }
 
+/// Runs the application in service mode
+///
+/// Starts a service node that can request signatures from the committee
+/// through the P2P network.
+///
+/// # Arguments
+/// * `bootstrap_addresses` - Addresses of bootstrap nodes for P2P network discovery
+///
+/// # Implementation Details
+/// - Connects to bootstrap nodes for peer discovery
+/// - Listens on port 10344 for P2P communication
+/// - Can submit signing requests to the committee
+/// - Waits for signature completion
+///
+/// # Returns
+/// Result indicating success or error during service operation
 pub async fn run_service_mode(
     bootstrap_addresses: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {

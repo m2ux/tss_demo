@@ -22,6 +22,12 @@
 //! 4. Operational State
 //!    - Committee becomes ready for signing operations
 //!    - Handles signing requests in Ready state
+//! 
+//!  Current Weaknesses:
+//! 
+//! - No validation of party identities beyond party IDs
+//! - No timeout handling in some state transitions could lead to deadlocks
+//! - The ExecutionIdCoordination doesn't validate uniqueness of execution IDs
 use crate::error::Error;
 use crate::network::{Receiver, Sender};
 use crate::p2p::P2PDelivery; // Update imports

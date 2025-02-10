@@ -1,3 +1,37 @@
+//! P2P-based delivery layer for distributed protocol communication.
+//!
+//! This module provides a P2P implementation of the network delivery system,
+//! using libp2p for message routing while maintaining API compatibility with
+//! the existing delivery interface. It implements:
+//! - Message stream abstraction over P2P transport
+//! - Automatic message conversion and routing
+//! - Automatic retries for message delivery
+//! - Thread-safe message handling
+//!
+//! # Architecture
+//!
+//! The module consists of three main components:
+//! * P2PMessageStream - Core message handling implementation
+//! * P2PStreamError - P2P-specific error types
+//! * P2PDelivery - Delivery trait implementation using P2P transport
+//!
+//! # Example Usage
+//!
+//! ```rust,no_run
+//! use crate::p2p::P2PDelivery;
+//! use crate::p2p_node::P2PNode;
+//!
+//! async fn example(node: Arc<P2PNode>) -> Result<(), NetworkError> {
+//!     let delivery = P2PDelivery::<MessageType>::connect(
+//!         node,
+//!         1,  // party_id
+//!         1   // session_id
+//!     ).await?;
+//!     
+//!     // Use delivery for message exchange
+//!     Ok(())
+//! }
+//! ```
 use crate::message::{NetworkMessage, WireMessage};
 use crate::network::{NetworkError, StreamDelivery};
 use crate::p2p_node::P2PNode;
@@ -12,24 +46,50 @@ use log::{debug, info, warn};
 /// Error types specific to P2P stream operations
 #[derive(Debug, thiserror::Error)]
 pub enum P2PStreamError {
+    /// General stream operation errors
     #[error("Stream error: {0}")]
     Stream(String),
 
+    /// P2P node-specific errors
     #[error("Node error: {0}")]
     Node(#[from] crate::p2p_node::P2PError),
 }
 
 /// A P2P message stream implementing Stream + Sink for NetworkMessage
+///
+/// Provides asynchronous message transmission and reception over P2P transport,
+/// with automatic message conversion and delivery retry capabilities.
 pub struct P2PMessageStream {
+    /// Reference to the P2P node handling network operations
     node: Arc<P2PNode>,
+    /// Channel for receiving messages from the network
     to_network_receiver: mpsc::UnboundedReceiver<NetworkMessage>,
+    /// Channel for sending messages to the network
     to_node_sender: mpsc::UnboundedSender<NetworkMessage>,
+    /// Unique identifier for this party
     party_id: u16,
+    /// Session identifier for message routing
     session_id: u16,
 }
 
 impl P2PMessageStream {
     /// Creates a new P2P stream connection
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - Reference to the P2P node
+    /// * `party_id` - Unique identifier for this party
+    /// * `session_id` - Session identifier for message routing
+    ///
+    /// # Returns
+    ///
+    /// Returns a Result containing the new stream or an error
+    ///
+    /// # Error Handling
+    ///
+    /// Returns P2PStreamError if:
+    /// * Session subscription fails
+    /// * Channel creation fails
     pub async fn new(
         node: Arc<P2PNode>,
         party_id: u16,
@@ -98,9 +158,20 @@ impl P2PMessageStream {
     }
 }
 
+/// Stream implementation for receiving messages
 impl Stream for P2PMessageStream {
     type Item = Result<NetworkMessage, P2PStreamError>;
 
+    /// Polls for the next message from the P2P network
+    ///
+    /// Handles message reception and conversion from raw bytes to NetworkMessage.
+    ///
+    /// # Returns
+    ///
+    /// * `Poll::Ready(Some(Ok(msg)))` - New message available
+    /// * `Poll::Ready(Some(Err(e)))` - Error occurred
+    /// * `Poll::Ready(None)` - Stream ended
+    /// * `Poll::Pending` - No message currently available
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match futures::ready!(Pin::new(&mut self.to_network_receiver).poll_recv(cx)) {
             Some(data) => Poll::Ready(Some(Ok(data))),
@@ -109,13 +180,28 @@ impl Stream for P2PMessageStream {
     }
 }
 
+/// Sink implementation for sending messages
 impl Sink<NetworkMessage> for P2PMessageStream {
     type Error = P2PStreamError;
 
+    /// Checks if the sink is ready to accept a new message
     fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
+    /// Initiates sending of a NetworkMessage
+    ///
+    /// Handles message conversion and initiates P2P delivery with retry logic
+    ///
+    /// # Arguments
+    ///
+    /// * `item` - NetworkMessage to send
+    ///
+    /// # Error Handling
+    ///
+    /// Returns P2PStreamError if:
+    /// * Message conversion fails
+    /// * Publishing fails after retries
     fn start_send(self: Pin<&mut Self>, item: NetworkMessage) -> Result<(), Self::Error> {
         // Send the message to the background task instead of publishing directly
         self.to_node_sender
@@ -123,15 +209,20 @@ impl Sink<NetworkMessage> for P2PMessageStream {
             .map_err(|_| P2PStreamError::Stream("Failed to send message to publishing task".into()))
     }
 
+    /// Flushes pending messages to the network
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
+    /// Closes the message stream
+    ///
+    /// Attempts to ensure pending messages are delivered before closing
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 }
 
+/// Cleanup implementation for P2PMessageStream
 impl Drop for P2PMessageStream {
     fn drop(&mut self) {
         // Try to unsubscribe when stream is dropped
@@ -152,6 +243,27 @@ impl<M> P2PDelivery<M>
 where
     M: Serialize + for<'de> Deserialize<'de> + Unpin + Send + 'static,
 {
+    /// Creates a new P2P delivery instance
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - Reference to the P2P node
+    /// * `party_id` - Unique identifier for this party
+    /// * `session` - Session identifier for message routing
+    ///
+    /// # Returns
+    ///
+    /// Returns a Result containing the new delivery instance or an error
+    ///
+    /// # Type Parameters
+    ///
+    /// * `M` - Message type that implements Serialize + Deserialize
+    ///
+    /// # Error Handling
+    ///
+    /// Returns NetworkError if:
+    /// * P2P stream creation fails
+    /// * Delivery initialization fails
     pub async fn connect(
         node: Arc<P2PNode>,
         party_id: u16,

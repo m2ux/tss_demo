@@ -210,14 +210,52 @@ impl KeyStorage {
         Ok(rmp_serde::from_slice(&decrypted)?)
     }
 
+    /// Saves an encrypted key share to persistent storage.
+    ///
+    /// This method provides specialized handling for CGGMP21 key shares:
+    /// 1. Serializes the key share using MessagePack (rmp_serde)
+    /// 2. Encrypts the serialized data using AES-GCM
+    /// 3. Writes the encrypted data to a keyed file
+    ///
+    /// # Arguments
+    ///
+    /// * `key_id` - Unique identifier for the stored key share
+    /// * `share` - The CGGMP21 key share to encrypt and store
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success, or `StorageError` on failure
+    ///
+    /// # Errors
+    ///
+    /// - `StorageError::Serialization`: If MessagePack serialization fails
+    /// - `StorageError::Encryption`: If AES-GCM encryption fails
+    /// - `StorageError::Io`: If writing to storage fails
+    ///
+    /// # Security Considerations
+    ///
+    /// - Uses AES-256-GCM for authenticated encryption
+    /// - Key shares are never stored in plaintext
+    /// - Each share is stored in a separate file
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use cggmp21::KeyShare;
+    /// use cggmp21::supported_curves::Secp256k1;
+    ///
+    /// # async fn example(storage: KeyStorage, key_share: KeyShare<Secp256k1>) -> Result<(), StorageError> {
+    /// storage.save_key_share("participant_1_share", &key_share)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn save_key_share(
         &self,
         key_id: &str,
         share: &KeyShare<Secp256k1>,
     ) -> Result<(), StorageError> {
-        // Serialize to a Vec<u8> using pot
         let serialized = rmp_serde::to_vec(&share)?;
-        let nonce = Nonce::from_slice(b"unique nonce");
+        let nonce = Nonce::from_slice(b"unique nonce"); //TODO: Use unique nonce
 
         let encrypted = self
             .cipher
@@ -230,11 +268,49 @@ impl KeyStorage {
         Ok(())
     }
 
+    /// Loads and decrypts a key share from storage.
+    ///
+    /// This method retrieves a CGGMP21 key share by:
+    /// 1. Reading the encrypted data from storage
+    /// 2. Decrypting using AES-GCM
+    /// 3. Deserializing using MessagePack into a KeyShare
+    ///
+    /// # Arguments
+    ///
+    /// * `key_id` - Unique identifier of the key share to load
+    ///
+    /// # Returns
+    ///
+    /// Returns `Result<KeyShare<Secp256k1>, StorageError>` containing either:
+    /// - `Ok(KeyShare)`: The successfully decrypted and deserialized key share
+    /// - `Err(StorageError)`: If loading or decryption fails
+    ///
+    /// # Errors
+    ///
+    /// - `StorageError::Io`: If reading from storage fails
+    /// - `StorageError::Encryption`: If AES-GCM decryption fails
+    /// - `StorageError::Serialization`: If MessagePack deserialization fails
+    ///
+    /// # Security Considerations
+    ///
+    /// - Verifies authentication tag during decryption
+    /// - Clears decrypted data from memory after deserialization
+    /// - Reports tampering through authentication failures
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(storage: KeyStorage) -> Result<(), StorageError> {
+    /// let key_share = storage.load_key_share("participant_1_share")?;
+    /// // Use the loaded key share for signing operations
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn load_key_share(&self, key_id: &str) -> Result<KeyShare<Secp256k1>, StorageError> {
         let path = self.storage_path.join(format!("{}.key", key_id));
         let encrypted = std::fs::read(path)?;
 
-        let nonce = Nonce::from_slice(b"unique nonce");
+        let nonce = Nonce::from_slice(b"unique nonce");     //TODO: Use unique nonce
         let decrypted = self
             .cipher
             .decrypt(nonce, encrypted.as_ref())

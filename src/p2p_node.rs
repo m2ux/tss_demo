@@ -1,8 +1,43 @@
 //! P2P-based delivery layer for distributed protocol communication.
 //!
-//! This module provides a P2P alternative to the network delivery system,
-//! using libp2p and gossipsub for peer-to-peer message routing while
-//! maintaining API compatibility with the existing delivery interface.
+//! This module provides P2P networking capabilities using libp2p for peer-to-peer
+//! message routing and discovery. It implements:
+//! - Peer discovery using Kademlia DHT
+//! - Topic-based pub/sub using GossipSub
+//! - Secure message transport with noise encryption
+//! - Session-based message routing
+//!
+//! # Architecture
+//!
+//! The system is built on several key components:
+//! * P2PNode - Core node managing network operations
+//! * ProtocolTopic - Topic management for message routing
+//! * SessionInfo - Session-based message handling
+//!
+//! # Protocol Components
+//!
+//! The node implements multiple libp2p protocols:
+//! * Kademlia - For peer discovery and DHT operations
+//! * GossipSub - For pub/sub message distribution
+//! * Identify - For peer information exchange
+//! * Noise - For transport encryption
+//!
+//! # Example Usage
+//!
+//! ```rust,no_run
+//! use crate::p2p_node::P2PNode;
+//!
+//! async fn example() -> Result<(), P2PError> {
+//!     let node = P2PNode::connect(
+//!         Some(vec!["bootstrap-addr".to_string()]),
+//!         vec!["listen-addr".to_string()],
+//!         "cggmp".to_string(),
+//!     ).await?;
+//!
+//!     // Use node for P2P communication
+//!     Ok(())
+//! }
+//! ```
 
 use crate::p2p_behaviour::{AgentBehaviour, AgentBehaviourEvent};
 use libp2p::identify::{
@@ -14,21 +49,17 @@ use libp2p::kad::{
 };
 use libp2p::noise::Config as NoiseConfig;
 use libp2p::{
-    identify, tcp::Config as TcpConfig, yamux, yamux::Config as YamuxConfig, Multiaddr,
+    tcp::Config as TcpConfig, yamux, yamux::Config as YamuxConfig, Multiaddr,
     StreamProtocol, Swarm, SwarmBuilder,
 };
-use libp2p_core::upgrade::Version;
-use libp2p_core::Transport;
 use libp2p_gossipsub as gossipsub;
-use libp2p_gossipsub::{Behaviour, Event as GossipEvent, Event, IdentTopic, TopicHash};
+use libp2p_gossipsub::{Behaviour, Event as GossipEvent, IdentTopic, TopicHash};
 use libp2p_identity::{self, Keypair, PeerId};
-use libp2p_kad::store::MemoryStore;
 use libp2p_kad::{GetProvidersOk, QueryResult, RecordKey};
-use libp2p_swarm::{NetworkBehaviour, SwarmEvent};
+use libp2p_swarm::SwarmEvent;
 use log::{debug, info, warn};
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
@@ -36,7 +67,7 @@ use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
-/// Message type (broadcast or p2p)
+/// Message type for distinguishing broadcast from point-to-point messages
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]
 pub enum MessageType {
     Broadcast,
@@ -45,9 +76,13 @@ pub enum MessageType {
 /// Configuration for P2P network setup
 #[derive(Clone, Debug)]
 pub struct P2PConfig {
+    /// Addresses of bootstrap nodes for initial network connection
     pub bootstrap_peers: Vec<Multiaddr>,
+    /// Local addresses to listen on
     pub listen_addresses: Vec<Multiaddr>,
+    /// Protocol identifier for network separation
     pub protocol: String,
+    /// Whether this node is a bootstrap node
     pub is_bootstrap_node: bool,
 }
 
@@ -69,8 +104,11 @@ pub enum P2PError {
 
 /// Information about an active delivery session
 pub struct SessionInfo {
+    /// Unique identifier for the party in this session
     pub party_id: u16,
+    /// Unique identifier for the session
     pub session_id: u16,
+    /// Channel for sending messages to this session
     pub sender: mpsc::UnboundedSender<Vec<u8>>,
 }
 
@@ -93,13 +131,24 @@ impl Clone for SessionInfo {
     }
 }
 
+/// Core P2P networking node
+///
+/// Manages peer connections, message routing, and protocol operations.
+/// Provides topic-based pub/sub and session management capabilities.
 pub struct P2PNode {
+    /// Network swarm managing peer connections and protocols
     swarm: Arc<Mutex<Swarm<AgentBehaviour>>>,
+    /// Node identity keypair
     keypair: Keypair,
+    /// Active communication sessions
     sessions: Arc<RwLock<HashMap<TopicHash, SessionInfo>>>,
+    /// Node running state
     running: Arc<RwLock<bool>>,
+    /// Protocol identifier
     pub protocol: String,
+    /// Known peers and their addresses
     peers: Arc<RwLock<HashMap<PeerId, Vec<Multiaddr>>>>,
+    /// Bootstrap process completion flag
     bootstrap_completed: AtomicBool,
 }
 
@@ -112,6 +161,15 @@ impl P2PNode {
     const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
     /// Creates a new P2P node with custom configuration
+    ///
+    /// # Arguments
+    /// * `config` - Configuration for the P2P node
+    ///
+    /// # Returns
+    /// Arc-wrapped P2PNode or error if initialization fails
+    ///
+    /// # Errors
+    /// Returns P2PError for transport, swarm, or protocol initialization failures
     pub async fn new(config: P2PConfig) -> Result<Arc<Self>, P2PError> {
         // Create identity keypair
         let keypair = Keypair::generate_ed25519();
@@ -211,7 +269,15 @@ impl P2PNode {
         Ok(node)
     }
 
-    /// Creates a new P2P node connection with production configuration
+    /// Creates a new P2P node with standard configuration
+    ///
+    /// # Arguments
+    /// * `bootstrap_addresses` - Optional list of bootstrap node addresses
+    /// * `listen_addresses` - Addresses to listen on
+    /// * `protocol` - Protocol identifier
+    ///
+    /// # Returns
+    /// Arc-wrapped P2PNode or error if initialization fails
     pub async fn connect(
         bootstrap_addresses: Option<Vec<String>>,
         listen_addresses: Vec<String>,
@@ -247,6 +313,8 @@ impl P2PNode {
     }
 
     /// Main event loop for P2P node operation
+    ///
+    /// Handles network events, peer connections, and message routing
     async fn run(node: Arc<Self>) -> Result<(), P2PError> {
         println!("Running");
         while *node.running.read().await {
@@ -311,7 +379,7 @@ impl P2PNode {
                         );
                     }
 
-                    // Optionally, if you want to also remove from Kademlia DHT
+                    // Remove from Kademlia DHT
                     let mut swarm = node.swarm.lock().await;
                     swarm.behaviour_mut().remove_peer(&peer_id);
 
@@ -361,7 +429,10 @@ impl P2PNode {
     pub fn peer_id(&self) -> PeerId {
         PeerId::from(self.keypair.public())
     }
-    
+
+    /// Handles Kademlia DHT events
+    ///
+    /// Processes peer discovery and routing table updates
     pub async fn handle_kadelia_event(node: Arc<Self>, event: KadEvent) {
         match event {
             KadEvent::RoutablePeer { peer, address } => {
@@ -439,11 +510,14 @@ impl P2PNode {
         }
     }
 
+    /// Handles GossipSub messaging events
+    ///
+    /// Processes pub/sub messages and subscription changes
     pub async fn handle_gossipsub_event(node: Arc<Self>, event: GossipEvent) {
         match event {
             GossipEvent::Message {
                 propagation_source: _propagation_source,
-                message_id,
+                message_id: _message_id,
                 message,
             } => {
                 Self::handle_incoming_message(&node, message.topic, message.data).await;
@@ -466,6 +540,9 @@ impl P2PNode {
         }
     }
 
+    /// Handles Identify protocol events
+    ///
+    /// Processes peer information updates and address registration
     pub async fn handle_identify_event(node: Arc<Self>, event: IdentifyEvent) {
         match event {
             IdentifyEvent::Sent {
@@ -516,6 +593,8 @@ impl P2PNode {
     }
 
     /// Handles peer discovery after bootstrap connection
+    ///
+    /// Sets up initial peer discovery and protocol announcements
     async fn handle_bootstrap_discovery(
         node: Arc<Self>,
         bootstrap_peer: PeerId,
@@ -554,6 +633,8 @@ impl P2PNode {
     }
 
     /// Performs a discovery cycle
+    ///
+    /// Queries random peers and refreshes protocol providers
     async fn perform_discovery(&self) -> Result<(), P2PError> {
         // Get current peers for discovery
         let peers: Vec<PeerId> = self.peers.read().await.keys().cloned().collect();
@@ -574,6 +655,8 @@ impl P2PNode {
     }
 
     /// Start periodic protocol announcements
+    ///
+    /// Announces node presence to the network periodically
     async fn start_protocol_announcements(self: Arc<Self>) {
         let node = Arc::clone(&self);
         tokio::spawn(async move {
@@ -614,6 +697,7 @@ impl P2PNode {
         });
     }
 
+    /// Announces this node's protocol support to the network
     async fn announce_protocol(&self) -> Result<(), P2PError> {
         let protocol_key = self.get_protocol_key();
 
@@ -654,6 +738,44 @@ impl P2PNode {
         *running = false;
     }
 
+    /// Handles incoming messages and routes them to the appropriate sessions.
+    ///
+    /// This method processes messages received over the P2P network and forwards them
+    /// to the relevant session handlers based on topic matching. It supports both
+    /// broadcast and point-to-point message routing.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - Reference to the P2P node instance
+    /// * `topic_hash` - Hash of the topic the message was received on
+    /// * `data` - Raw message data as bytes
+    ///
+    /// # Message Routing
+    ///
+    /// Messages are routed based on their topic type:
+    /// - Broadcast topics (`{protocol}/broadcast/{session_id}`):
+    ///   * Messages are forwarded to all sessions matching the session ID
+    ///   * Used for protocol-wide announcements and coordination
+    ///
+    /// - P2P topics (`{protocol}/p2p/{session_id}/{party_id}`):
+    ///   * Messages are forwarded only to the specific session matching both
+    ///     session ID and party ID
+    ///   * Used for direct communication between parties
+    ///
+    /// # Implementation Details
+    ///
+    /// 1. Converts the topic hash to a ProtocolTopic instance
+    /// 2. Determines message type (broadcast or P2P) from topic format
+    /// 3. Looks up relevant sessions in the sessions registry
+    /// 4. Forwards message data to matching session channels
+    ///
+    ///
+    /// # Thread Safety
+    ///
+    /// - Uses read-only access to sessions registry
+    /// - Message forwarding is done through thread-safe channels
+    /// - Topic parsing is performed immutably
+    ///
     async fn handle_incoming_message(node: &Arc<Self>, topic_hash: TopicHash, data: Vec<u8>) {
         let sessions = node.sessions.read().await;
         let topic = ProtocolTopic::from_ident_topic(
@@ -690,7 +812,15 @@ impl P2PNode {
         ProtocolTopic::new_p2p(&self.protocol, session_id, party_id)
     }
 
-    /// Subscribes to relevant topics for a party
+    /// Subscribes to relevant topics for a party in a session
+    ///
+    /// # Arguments
+    /// * `party_id` - Party identifier
+    /// * `session_id` - Session identifier
+    /// * `sender` - Channel for forwarding received messages
+    ///
+    /// # Errors
+    /// Returns P2PError if subscription fails
     pub async fn subscribe_to_session(
         &self,
         party_id: u16,
@@ -729,25 +859,14 @@ impl P2PNode {
         Ok(())
     }
 
-    /// Unsubscribes from a session, removing all associated topic subscriptions and session data.
-    ///
-    /// This method removes the party from both broadcast and P2P topics for the specified session
-    /// and cleans up any associated session data.
+    /// Unsubscribes from a session's topics
     ///
     /// # Arguments
-    ///
-    /// * `party_id` - The ID of the party to unsubscribe
-    /// * `session_id` - The ID of the session to unsubscribe from
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` if unsubscription was successful, or a `P2PError` if an error occurred.
+    /// * `party_id` - Party identifier
+    /// * `session_id` - Session identifier
     ///
     /// # Errors
-    ///
-    /// Returns `P2PError` if:
-    /// * Failed to acquire swarm lock
-    /// * Protocol error during unsubscription
+    /// Returns P2PError if unsubscription fails
     pub async fn unsubscribe_from_session(
         &self,
         party_id: u16,
@@ -777,6 +896,18 @@ impl P2PNode {
         Ok(())
     }
 
+    /// Publishes a message to the network
+    ///
+    /// # Arguments
+    /// * `data` - Message to publish
+    /// * `recipient` - Optional specific recipient
+    /// * `session_id` - Session identifier
+    ///
+    /// # Type Parameters
+    /// * `M` - Message type implementing Serialize
+    ///
+    /// # Errors
+    /// Returns P2PError if publishing fails
     pub async fn publish_message<M>(
         &self,
         data: &M,
