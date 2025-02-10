@@ -4,60 +4,121 @@ A Rust demo implementation of the CGGMP21 threshold signature scheme for secure 
 
 ## Overview
 
-This project implements the CGGMP21 protocol for distributed threshold signing operations, allowing a committee of parties to collectively manage cryptographic operations without requiring complete trust between participants. The implementation provides secure multiparty computation capabilities with threshold-based signing.
+This project implements the CGGMP21 protocol for distributed threshold signing operations, allowing a committee of parties to collectively manage cryptographic operations without requiring complete trust between participants. The implementation uses a P2P network architecture for secure communication and coordination.
 
 ## Features
 
 - **Distributed Committee Management**
-  - Dynamic committee formation
-  - Threshold-based participation
-  - Secure member coordination
+    - Dynamic committee formation using P2P discovery
+    - Threshold-based participation (3-of-n)
+    - Secure member coordination via LibP2P's GossipSub
+    - Automatic peer discovery using Kademlia DHT
 
 - **Threshold Signing Operations**
-  - Distributed key generation
-  - Secure key share management
-  - Threshold-based signing operations
+    - Distributed key generation
+    - Secure key share management
+    - Deterministic signer selection (lowest 3 party IDs)
+    - Threshold signature generation (t=3)
+
+- **P2P Network Architecture**
+    - Kademlia DHT for peer discovery
+    - GossipSub for reliable message broadcast
+    - Noise protocol for transport encryption
+    - Automatic retry mechanisms
+    - Session-based message routing
 
 - **Protocol Security**
-  - Implementation of CGGMP21 threshold signature scheme
-  - Secure execution ID coordination
-  - Protected auxiliary information generation
-
-- **Robust Network Communication**
-  - WebSocket-based messaging
-  - Asynchronous operation handling
-  - Reliable broadcast capabilities
+    - CGGMP21 threshold signature scheme
+    - LibP2P Noise encryption for P2P communication
+    - AES-GCM encrypted key share storage
+    - Message authentication using GossipSub
+    - Protected auxiliary information generation
 
 ## Protocol Flow
 
-1. **Committee Formation**
-   - Parties announce themselves to the network
-   - Committee forms when sufficient members join
-   - Threshold requirements are validated
+1. **Network Initialization**
+    - Bootstrap node starts on port 8000
+    - Committee members connect on ports 10334 + party_id
+    - P2P mesh network forms via Kademlia DHT
+    - Service node connects on port 10344
 
-2. **Execution ID Establishment**
-   - Lowest-ID party proposes execution ID
-   - Other parties validate and accept/reject
-   - Consensus required for progression
+2. **Committee Formation**
+    - Committee members discover each other via bootstrap node
+    - Members establish direct P2P connections
+    - Committee forms when 3 or more members join
+    - Members generate execution ID via consensus
 
 3. **Key Generation**
-   - Auxiliary information generation
-   - Distributed key generation protocol
-   - Individual key share creation
+    - Members generate auxiliary information
+    - Perform distributed key generation (CGGMP21)
+    - Store encrypted key shares (AES-GCM)
+    - Members announce readiness for signing
 
-4. **Operational State**
-   - Committee becomes ready for signing
-   - Handles threshold signing requests
-   - Maintains secure state management
+4. **Signing Operations**
+    - Service node submits signing requests
+    - Available members respond within 5-second window
+    - Lowest 3 party IDs selected as signers
+    - Signers generate and verify threshold signature
+
+## Known Weaknesses
+
+The current implementation has several known weaknesses and limitations that should be addressed before considering 
+this ready for anything more than basic demonstration use:
+
+- **Timing Attack Vulnerability**
+    - In signing.rs, signature verification uses non-constant-time comparison
+    - Potential timing side-channel during signature share verification
+    - Currently compares signatures using standard equality checks
+
+- **State Transition Issues**
+    - Some state transitions lack proper error handling in signing protocol
+    - Committee state machine lacks recovery mechanisms for interrupted sessions
+    - No automatic retry for failed state transitions
+
+- **Network Security**
+    - Bootstrap node becomes a single point of failure
+    - No validation of bootstrap node identity
+    - Peer discovery relies on trusted bootstrap nodes
+    - No blacklisting mechanism for misbehaving peers (aka Identifiable Abort)
+
+- **Protocol Limitations**
+    - Fixed 5-second collection window may be inappropriate for some network conditions
+    - Deterministic signer selection (lowest 3 IDs) could be gamed by malicious parties
+    - No dynamic adjustment of threshold parameters
+    - No support for party removal/addition after committee formation
+
+- **Security Implementation**
+    - Fixed nonce ("unique nonce") used in storage encryption
+    - No secure key erasure from memory after operations
+    - Limited protection against message replay attacks
+    - No rate limiting for message broadcasts
+
+- **Error Recovery**
+    - Limited recovery mechanisms for network partitions
+    - No automatic reconnection strategy for dropped peers
+    - Incomplete cleanup of resources in some error cases
+    - No persistent state recovery across restarts
+
+- **Missing Features**
+    - No member replacement protocol
+    - No support for concurrent signing sessions
+    - Limited monitoring and metrics collection
+    - No persistent logging of protocol events
+
+- **Performance Considerations**
+    - Unbounded message queues could lead to memory issues
+    - No backpressure mechanisms in P2P communication
+    - GossipSub mesh might not scale efficiently with large number of parties
+    - No message batching for network optimization
 
 ## Technical Requirements
 
 - Rust (latest stable version)
 - Dependencies:
-  - `cggmp21` and related crates
-  - `tokio` for async runtime
-  - `serde` for serialization
-  - Additional dependencies listed in `Cargo.toml`
+    - `cggmp21` and related crates for threshold signatures
+    - `libp2p` for P2P networking
+    - `tokio` for async runtime
+    - Additional dependencies listed in `Cargo.toml`
 
 ## Building
 
@@ -72,25 +133,27 @@ cargo build --release
 
 ## Running
 
+Start a bootstrap node for peer discovery:
+```bash
+cggmp21-demo bootstrap
+```
 
- Start as a committee member:
- ```bash
- cggmp21-demo --committee --party-id <ID> --server <SERVER_ADDRESS>
- ```
+Start committee members (run 3 or more):
+```bash
+cggmp21-demo committee --party-id 1
+cggmp21-demo committee --party-id 2
+cggmp21-demo committee --party-id 3
+```
 
- Initiate a signing operation:
- ```bash
- cggmp21-demo --message "Message to sign" --party-id <ID> --server <SERVER_ADDRESS>
- ```
+Start a service node to request signatures:
+```bash
+cggmp21-demo service
+```
 
- Run as coordination server:
- ```bash
- cggmp21-demo --server-mode --server <SERVER_ADDRESS>
- ```
-
-Where:
-- `<ID>` is the unique identifier for this committee member (e.g. 1)
-- `<SERVER_ADDRESS>` is the WebSocket address of the coordination server (e.g. "ws://localhost:8080")
+Note: Each node type uses specific ports:
+- Bootstrap node: Port 8000
+- Committee members: Port 10334 + party_id
+- Service node: Port 10344
 
 ## Development
 
@@ -98,27 +161,67 @@ Where:
 
 ```
 src/
-├── protocol.rs    - Committee protocol implementation
-├── network.rs     - Network communication handling
-├── signing.rs     - Signing protocol implementation
-├── storage.rs     - Key and data storage management
-└── error.rs       - Error handling definitions
+├── main.rs          - Application entry point and CLI
+├── committee.rs     - Committee protocol implementation
+├── signing.rs       - Signing protocol implementation
+├── p2p_node.rs      - P2P networking core
+├── p2p.rs           - P2P message delivery
+├── p2p_behaviour.rs - P2P behavior implementation
+├── service.rs       - Signing service implementation
+├── message.rs       - Protocol message definitions
+├── network.rs       - Network abstractions
+├── storage.rs       - Key and data storage management
+└── error.rs         - Error handling definitions
 ```
 
-### Key Components
+### Components
 
-- **Protocol**: Manages committee lifecycle and operations
-- **Network**: Handles WebSocket-based communication
-- **Signing**: Implements threshold signing operations
-- **Storage**: Manages secure storage of keys and protocol data
+- **P2PNode**: Core P2P networking using LibP2P
+    - Peer discovery via Kademlia DHT
+    - Message broadcast using GossipSub
+    - Transport encryption with Noise
+    - Session-based routing
+
+- **P2PBehaviour**: Network protocol behaviors
+    - Kademlia for peer discovery
+    - GossipSub for pub/sub messaging
+    - Identify for peer metadata
+    - Custom protocol handlers
+
+- **Committee**: Protocol coordination
+    - Committee formation and management
+    - Distributed key generation
+    - Member synchronization
+    - State machine-based protocol
+
+- **Signing**: Threshold signing operations
+    - Signature share generation
+    - Share verification
+    - Deterministic signer selection
+    - Round-based protocol
+
+- **Service**: Request handling
+    - Message signing requests
+    - Committee coordination
+    - Response aggregation
+    - State management
+
+- **Storage**: Secure data management
+    - AES-GCM encrypted storage
+    - Key share management
+    - Session state persistence
+    - Secure serialization
 
 ## Security Considerations
 
-- Requires a minimum of 3 committee members for security
-- Implements threshold-based operations for distributed trust
-- Secure key share generation and management
-- Protected auxiliary information handling
-- Consensus-based execution ID coordination
+- Minimum of <t> committee members required
+- P2P traffic encrypted using Noise protocol
+- Key shares protected with AES-GCM
+- GossipSub message authentication
+- Consensus-based execution ID
+- Deterministic signer selection
+- 5-second collection window for signing
+- Protected auxiliary information
 
 ## Contributing
 
@@ -138,6 +241,7 @@ Apache 2.0 or MIT
 
 - [CGGMP21 Paper](https://eprint.iacr.org/2021/060.pdf)
 - [Threshold ECDSA based on CGGMP21](https://github.com/LFDT-Lockness/cggmp21)
+- [LibP2P Documentation](https://docs.rs/libp2p)
 
 ## Acknowledgments
 

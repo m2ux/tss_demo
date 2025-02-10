@@ -2,57 +2,96 @@
 //!
 //! This module implements a distributed signing protocol based on CGGMP21. It provides:
 //! - State machine-based protocol management for robust signing coordination
-//! - Multi-party signature generation with threshold security
-//! - Secure WebSocket-based communication between parties
-//! - Quorum-based decision making for signature participants
+//! - Multi-party signature generation with threshold security (3-of-n)
+//! - P2P-based communication between parties
+//! - Deterministic signer selection based on party IDs
 //!
 //! # Protocol Flow
 //!
 //! The distributed signing process follows these stages:
 //! 1. **Sign Request Reception**: A party initiates a signing request with a message
-//! 2. **Candidate Collection**: Available parties respond and are collected
-//! 3. **Quorum Formation**: Participants agree on the signing group
-//! 4. **Signature Generation**: Each party generates their signature share
-//! 5. **Signature Verification**: The combined signature is verified
-//!
-//! # State Machine Transitions
-//!
-//! ```text
-//! Idle -> CollectingCandidates (on SignRequest)
-//! CollectingCandidates -> ComparingCandidates (on CollectionTimeout)
-//! ComparingCandidates -> CollectingApprovals (on QuorumApproved)
-//! CollectingApprovals -> Signing (on ReadyToSign)
-//! Signing -> VerifyingSignatures (on SigningComplete)
-//! VerifyingSignatures -> Idle (on VerificationComplete)
-//! Any State -> TidyUp (on EndSigning)
-//! ```
-//!
-//! # Examples
-//!
-//! Basic usage of the signing protocol:
-//!
-//! ```no_run
-//! use cggmp21_demo::signing::{Signing, KeyStorage};
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     let storage = KeyStorage::new();
-//!     let mut signing = Signing::new(storage).await.unwrap();
-//!     signing.start(1, "ws://localhost:8080").await.unwrap();
-//! }
-//! ```
+//! 2. **Candidate Collection**: Available parties respond within a 5-second window
+//! 3. **Candidate Set Comparison**: Parties ensure consistent views of available signers
+//! 4. **Quorum Formation**: Parties agree on the signing group (lowest 3 party IDs)
+//! 5. **Signature Generation**: Selected parties generate their signature shares
+//! 6. **Signature Verification**: All parties verify the combined signature
 //!
 //! # Security Considerations
 //!
-//! - The protocol requires a secure communication channel between parties
-//! - Each party must maintain the secrecy of their key shares
-//! - The quorum size affects the security threshold of the protocol
-//! - Network delays may impact the protocol timing and participant selection
+//! - Uses P2P communication with libp2p for secure message transport
+//! - Deterministic signer selection prevents manipulation of signing group
+//! - 5-second collection window ensures timely participation
+//! - Requires exact matching of candidate sets across all parties
+//! - All parties must approve the quorum before signing begins
+//! - Signature shares are verified for consistency
+//!
+//! # Examples
+//!
+//! Basic usage within a committee:
+//!
+//! ```no_run
+//! use cggmp21_demo::signing::{Protocol, KeyStorage};
+//! use cggmp21_demo::p2p_node::P2PNode;
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     let storage = KeyStorage::new("keys", "secure-password").unwrap();
+//!     let p2p_node = Arc::new(P2PNode::connect(
+//!         Some(vec!["bootstrap-addr".to_string()]),
+//!         vec!["listen-addr".to_string()],
+//!         "cggmp".to_string()
+//!     ).await.unwrap());
+//!
+//!     let mut protocol = Protocol::new(1, p2p_node, storage).await.unwrap();
+//!     protocol.start().await.unwrap();
+//! }
+//! ```
+//!
+//! # Message Flow
+//!
+//! ```text
+//! ┌────────┐    ┌──────────┐    ┌─────────────────┐    ┌──────────┐
+//! │ Sign   │    │ Collect  │    │ Compare Sets &  │    │ Generate │
+//! │Request │───>│ Candidat.│───>│ Form Quorum     │───>│ Shares   │
+//! └────────┘    └──────────┘    └─────────────────┘    └──────────┘
+//!                    │                   │                    │
+//!                    │                   │                    │
+//!              5s Timeout          All Must Match       Verify All
+//!                    │                   │                    │
+//!                    v                   v                    v
+//! ```
+//!
+//! # Implementation Details
+//!
+//! - Uses tokio for async runtime and concurrent operations
+//! - State machine implemented using the `rust-fsm` crate
+//! - P2P communication via libp2p with custom protocol identifiers
+//! - Thread-safe state management using Arc<RwLock>
+//! - Staggered communication delays based on party ID
+//! - Automatic session cleanup on drop
+//!
+//! # Error Handling
+//!
+//! The protocol handles several categories of errors:
+//! - Network communication failures (P2P disconnections, timeouts)
+//! - Protocol violations (mismatched sets, invalid transitions)
+//! - Signing operation failures (share generation, verification)
+//! - Storage errors (key access, serialization)
+//!
+//! Errors are propagated through the Result type and include detailed context.
+//! 
+//!  Current Weaknesses:
+//!  - Potential timing attacks in signature verification: The comparison isn't constant-time, 
+//!    potentially leaking information about signatures
+//! - Some state transitions lack proper error handling, leading to potential protocol violations
+//! 
+use crate::committee::{CommitteeSession, ControlMessage};
 use crate::error::Error;
 use crate::network;
 use crate::network::{Receiver, Sender};
-use crate::protocol::CommitteeSession;
-use crate::signing::signing_protocol::Input;
+use crate::p2p::P2PDelivery;
+use crate::p2p_node::P2PNode;
+use crate::signing::fsm::Input;
 use crate::storage::KeyStorage;
 use crate::websocket::WsDelivery;
 use cggmp21::supported_curves::Secp256k1;
@@ -70,56 +109,74 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
 
-/// Protocol messages exchanged between signing participants.
-///
-/// Each message type represents a specific stage or action in the distributed
-/// signing protocol. Messages are exchanged over WebSocket connections and
-/// coordinate the multi-party signing process.
-#[derive(Serialize, Deserialize, Debug)]
-pub enum SigningProtocolMessage {
-    /// Request to sign a specific message.
-    ///
-    /// # Fields
-    /// * `message` - The message bytes to be signed
-    SignRequest { message: Vec<u8> },
-
-    /// Indicates a party's availability to participate in signing.
-    /// Sent in response to a SignRequest.
-    SigningAvailable,
-
-    /// Shares the set of available signing candidates.
-    ///
-    /// # Fields
-    /// * `candidates` - Set of party IDs that are available for signing
-    CandidateSet { candidates: HashSet<u16> },
-
-    /// Indicates approval of the proposed signing quorum.
-    QuorumApproved,
-
-    /// Indicates rejection of the proposed signing quorum.
-    QuorumDeclined,
-
-    /// Contains a party's signature share.
-    ///
-    /// # Fields
-    /// * `sig_share` - The partial signature generated by this party
-    SignatureShare { sig_share: Signature<Secp256k1> },
-
-    /// Result of signature verification.
-    ///
-    /// # Fields
-    /// * `success` - Whether the signature was successfully verified
-    VerificationResult { success: bool },
-
-    /// Signals the end of the signing session.
-    EndSigning,
-}
-
-// State machine definition
 state_machine! {
+    /// State machine definition for the CGGMP21 signing protocol.
+    ///
+    /// The state machine coordinates the multi-party signing process through well-defined
+    /// states and transitions. Each state represents a distinct phase of the protocol,
+    /// and transitions occur in response to specific events or conditions.
+    ///
+    /// # States
+    ///
+    /// * `Idle` - Initial state, waiting for signing requests
+    /// * `CollectingCandidates` - Gathering available signing parties
+    /// * `ComparingCandidates` - Verifying consistent candidate sets
+    /// * `CollectingApprovals` - Forming signing quorum
+    /// * `Signing` - Generating signature shares
+    /// * `VerifyingSignatures` - Validating combined signature
+    /// * `TidyUp` - Cleanup and reset
+    ///
+    /// # Transitions and Events
+    ///
+    /// From Idle:
+    /// - `Starting` -> Idle (initialization complete)
+    /// - `SignRequestReceived` -> CollectingCandidates (new signing request)
+    /// - `EndSigning` -> TidyUp (abort request)
+    ///
+    /// From CollectingCandidates:
+    /// - `CandidateAvailable` -> CollectingCandidates (party announces availability)
+    /// - `CollectionTimeout` -> ComparingCandidates[BroadcastCandidatesSet] (5s window elapsed)
+    /// - `QuorumDeclined` -> Idle (insufficient parties)
+    /// - `EndSigning` -> TidyUp (abort request)
+    ///
+    /// From ComparingCandidates:
+    /// - `CandidateSetReceived` -> ComparingCandidates (received party's candidate set)
+    /// - `QuorumApproved` -> CollectingApprovals (sets match)
+    /// - `QuorumDeclined` -> Idle (sets mismatch)
+    /// - `EndSigning` -> TidyUp (abort request)
+    ///
+    /// From CollectingApprovals:
+    /// - `QuorumApproved` -> CollectingApprovals (party approved quorum)
+    /// - `QuorumDeclined` -> Idle (party rejected quorum)
+    /// - `ReadyToSign` -> Signing (all parties approved)
+    /// - `EndSigning` -> TidyUp (abort request)
+    ///
+    /// From Signing:
+    /// - `SigningComplete` -> VerifyingSignatures (shares generated)
+    /// - `SigningSkipped` -> Idle (non-selected party)
+    /// - `EndSigning` -> TidyUp (abort request)
+    ///
+    /// From VerifyingSignatures:
+    /// - `VerificationComplete` -> Idle (signature verified)
+    /// - `EndSigning` -> TidyUp (abort request)
+    ///
+    /// # Outputs
+    ///
+    /// The state machine can produce the following outputs during transitions:
+    /// * `BroadcastCandidatesSet` - Broadcast local candidate set to all parties
+    ///
+    /// # Implementation Details
+    ///
+    /// - Uses the rust-fsm crate for state machine implementation
+    /// - State transitions are atomic and thread-safe
+    /// - States persist across async boundaries
+    /// - Debug representation available for logging
+    /// - C-compatible representation (repr(C))
+    ///
+    /// ```
     #[derive(Debug)]
     #[repr(C)]
-    signing_protocol(Idle)
+    fsm(Idle)
 
     Idle => {
         Starting => Idle,
@@ -159,11 +216,56 @@ state_machine! {
     }
 }
 
-/// Environment data for the signing protocol state machine.
+/// Protocol messages exchanged between signing participants.
+///
+/// Each message type represents a specific stage or action in the distributed
+/// signing protocol. Messages are exchanged over WebSocket connections and
+/// coordinate the multi-party signing process.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum Message {
+    /// Request to sign a specific message.
+    ///
+    /// # Fields
+    /// * `message` - The message bytes to be signed
+    SignRequest { message: Vec<u8> },
+
+    /// Indicates a party's availability to participate in signing.
+    /// Sent in response to a SignRequest.
+    SigningAvailable,
+
+    /// Shares the set of available signing candidates.
+    ///
+    /// # Fields
+    /// * `candidates` - Set of party IDs that are available for signing
+    CandidateSet { candidates: HashSet<u16> },
+
+    /// Indicates approval of the proposed signing quorum.
+    QuorumApproved,
+
+    /// Indicates rejection of the proposed signing quorum.
+    QuorumDeclined,
+
+    /// Contains a party's signature share.
+    ///
+    /// # Fields
+    /// * `sig_share` - The partial signature generated by this party
+    SignatureShare { sig_share: Signature<Secp256k1> },
+
+    /// Result of signature verification.
+    ///
+    /// # Fields
+    /// * `success` - Whether the signature was successfully verified
+    VerificationResult { success: bool },
+
+    /// Signals the end of the signing session.
+    EndSigning,
+}
+
+/// Context data for the signing protocol state machine.
 ///
 /// Maintains the protocol state and coordinates the signing process
-/// across multiple parties.
-pub struct SigningEnv {
+/// across multiple parties. Thread-safe access is provided through Arc<RwLock>.
+pub struct Context {
     /// Collected signature shares from participating parties
     received_signatures: HashMap<u16, Signature<Secp256k1>>,
 
@@ -189,8 +291,8 @@ pub struct SigningEnv {
     signing_parties: Vec<u16>,
 }
 
-impl SigningEnv {
-    /// Creates a new signing environment with default settings.
+impl Context {
+    /// Creates a new signing context with default settings.
     ///
     /// # Returns
     /// A new `SigningEnv` instance initialized with empty collections
@@ -251,68 +353,67 @@ impl SigningEnv {
 /// Signing protocol coordinator.
 ///
 /// Manages the distributed signing process through a state machine,
-/// coordinating communication and operations between multiple parties.
-///
-/// # States
-///
-/// * `Idle` - Initial state, waiting for signing requests
-/// * `CollectingCandidates` - Gathering responses from available parties
-/// * `ComparingCandidates` - Ensuring consistent candidate sets
-/// * `CollectingApprovals` - Forming the signing quorum
-/// * `Signing` - Generating partial signatures
-/// * `VerifyingSignatures` - Validating the combined signature
-/// * `TidyUp` - Final cleanup before returning to Idle
-///
-pub struct Signing {
-    fsm: StateMachine<signing_protocol::Impl>,
-    context: Arc<RwLock<SigningEnv>>,
+/// coordinating P2P communication and operations between multiple parties.
+pub struct Protocol {
+    fsm: StateMachine<fsm::Impl>,
+    context: Arc<RwLock<Context>>,
     storage: KeyStorage,
+    p2p_node: Arc<P2PNode>,
+    party_id: u16,
 }
 
-impl Signing {
+impl Protocol {
     /// Creates a new signing protocol instance.
     ///
     /// # Parameters
+    /// * `party_id` - Unique identifier for this protocol participant
+    /// * `p2p_node` - P2P networking node for communication
     /// * `storage` - Storage for cryptographic keys and protocol data
     ///
     /// # Returns
-    /// A Result containing the new Signing instance or an error
+    /// A Result containing the new Protocol instance or an error
     ///
     /// # Errors
     /// Returns an error if initialization fails
-    pub async fn new(storage: KeyStorage) -> Result<Self, Error> {
+    pub async fn new(
+        party_id: u16,
+        p2p_node: Arc<P2PNode>,
+        storage: KeyStorage,
+    ) -> Result<Self, Error> {
         // Initialize signing context data
-        let context = Arc::new(RwLock::new(SigningEnv::new()));
+        let context = Arc::new(RwLock::new(Context::new()));
 
         Ok(Self {
             fsm: StateMachine::new(),
             context: Arc::clone(&context),
             storage,
+            p2p_node,
+            party_id,
         })
     }
 
     /// Starts the signing protocol.
     ///
-    /// # Parameters
-    /// * `party_id` - The unique identifier of this signing party
-    /// * `server_addr` - WebSocket server address for communication
+    /// Initializes P2P communication and begins processing protocol messages.
+    /// Runs until explicitly stopped or an error occurs.
     ///
     /// # Returns
     /// A Result indicating success or failure
     ///
     /// # Errors
     /// Returns an error if:
-    /// * Connection to the server fails
+    /// * P2P connection fails
     /// * Protocol initialization fails
     /// * Communication errors occur during the protocol
-    pub async fn start(&mut self, party_id: u16, server_addr: &str) -> Result<(), Error> {
-        // Create a new delivery instance for aux info generation
-        let delivery = WsDelivery::<SigningProtocolMessage>::connect(
-            server_addr,
-            party_id,
+    pub async fn start(&mut self) -> Result<(), Error> {
+        // Initialize P2P delivery for signing control messages
+        let delivery = P2PDelivery::<Message>::connect(
+            Arc::clone(&self.p2p_node),
+            self.party_id,
             CommitteeSession::SigningControl,
         )
         .await?;
+
         let (receiver, sender) = Delivery::split(delivery);
 
         // Spawn message receiving task
@@ -441,14 +542,11 @@ impl Signing {
     /// - Network communication uses non-blocking async operations
     /// - Error propagation maintains protocol safety
     ///
-    async fn run_machine(
-        &mut self,
-        mut sender: Sender<SigningProtocolMessage>,
-    ) -> Result<(), Error> {
+    async fn run_machine(&mut self, mut sender: Sender<Message>) -> Result<(), Error> {
         // Get out party ID
         let party_id = sender.get_party_id();
         let mut delivery_handle: Option<
-            Result<WsDelivery<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>, Error>,
+            Result<P2PDelivery<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>, Error>,
         > = None;
 
         // Starting event
@@ -460,17 +558,18 @@ impl Signing {
 
             // Pre-transition actions
             match (&self.fsm.state(), context.last_event.take()) {
-                (signing_protocol::State::TidyUp, _) => {
+                (fsm::State::TidyUp, _) => {
                     println!("Transition: TidyUp state - Cleaning up and exiting");
                     // Tidy-up goes here
                     return Ok(());
                 }
 
-                (signing_protocol::State::Idle, Some(Input::Starting)) => {
-                    println!("Committee ready for signing operations.");
+                (fsm::State::Idle, Some(Input::Starting)) => {
+                    let peer_id = self.p2p_node.peer_id();
+                    println!("Ready for signing operations as party {party_id} [{peer_id}]");
                 }
 
-                (signing_protocol::State::Idle, Some(Input::SignRequestReceived)) => {
+                (fsm::State::Idle, Some(Input::SignRequestReceived)) => {
                     println!("Transition: Idle -> CollectingCandidates (SignRequestReceived)");
                     println!("- Clearing previous candidates and setting collection deadline");
                     context.signing_candidates.clear();
@@ -479,16 +578,14 @@ impl Signing {
                     // Add self to candidates and broadcast availability
                     context.signing_candidates.insert(party_id);
                     println!("- Added self (party_id: {}) to candidates", party_id);
-                    sender
-                        .broadcast(SigningProtocolMessage::SigningAvailable)
-                        .await?;
+                    sender.broadcast(Message::SigningAvailable).await?;
 
                     // Spawn delivery handler in a new task
                     delivery_handle = Some(
-                        WsDelivery::<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>::connect(
-                            "ws://localhost:8080",
+                        P2PDelivery::<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>::connect(
+                            Arc::clone(&self.p2p_node),
                             party_id,
-                            CommitteeSession::Signing,
+                            CommitteeSession::SigningProtocol,
                         )
                         .await
                         .map_err(Error::from),
@@ -497,17 +594,14 @@ impl Signing {
                     context.event(Input::SignRequestReceived);
                 }
 
-                (signing_protocol::State::CollectingCandidates, _) => {
+                (fsm::State::CollectingCandidates, _) => {
                     // Check for timeout
                     if context.is_deadline_elapsed() {
                         println!("- Committee candidate discovery complete");
                         context.event(Input::CollectionTimeout);
                     }
                 }
-                (
-                    signing_protocol::State::ComparingCandidates,
-                    Some(Input::CandidateSetReceived),
-                ) => {
+                (fsm::State::ComparingCandidates, Some(Input::CandidateSetReceived)) => {
                     // Delay to stagger comms to account for the fact that IPC queues are unbounded
                     tokio::time::sleep(Duration::from_millis((50 * party_id) as u64)).await;
                     println!("Transition: ComparingCandidates state (CandidateSetReceived)");
@@ -534,9 +628,7 @@ impl Signing {
                         if all_sets_match {
                             println!("- Broadcasting quorum approval");
                             // Broadcast approval
-                            sender
-                                .broadcast(SigningProtocolMessage::QuorumApproved)
-                                .await?;
+                            sender.broadcast(Message::QuorumApproved).await?;
                             context.event(Input::QuorumApproved);
                         } else {
                             println!("- Broadcasting quorum decline due to mismatched sets");
@@ -551,13 +643,11 @@ impl Signing {
                                 }
                             }
                             // Broadcast decline
-                            sender
-                                .broadcast(SigningProtocolMessage::QuorumDeclined)
-                                .await?
+                            sender.broadcast(Message::QuorumDeclined).await?
                         }
                     }
                 }
-                (signing_protocol::State::CollectingApprovals, Some(Input::QuorumApproved)) => {
+                (fsm::State::CollectingApprovals, Some(Input::QuorumApproved)) => {
                     tokio::time::sleep(Duration::from_millis((50 * party_id) as u64)).await;
                     println!("Transition: CollectingApprovals state (QuorumApproved)");
                     println!("- Approvals received: {}", context.quorum_approved.len());
@@ -583,7 +673,7 @@ impl Signing {
                         context.last_event = Some(Input::ReadyToSign);
                     }
                 }
-                (signing_protocol::State::Signing, _) => {
+                (fsm::State::Signing, _) => {
                     // Perform signing
                     // If we are not a signatory then quit the process
                     if !context.signing_parties.contains(&party_id) {
@@ -612,7 +702,7 @@ impl Signing {
                                     context.received_signatures.insert(party_id, signature);
                                     // Broadcast our signature
                                     sender
-                                        .broadcast(SigningProtocolMessage::SignatureShare {
+                                        .broadcast(Message::SignatureShare {
                                             sig_share: signature,
                                         })
                                         .await
@@ -635,9 +725,12 @@ impl Signing {
                             }
                             tokio::time::sleep(Duration::from_millis((50 * party_id) as u64)).await;
                         }
+                        else {
+                            println!("Couldn't take delivery handle");
+                        }
                     }
                 }
-                (signing_protocol::State::VerifyingSignatures, _) => {
+                (fsm::State::VerifyingSignatures, _) => {
                     // Check if we have signatures from all signing parties
                     if context.received_signatures.len() == context.signing_parties.len() {
                         // Get the first signature as reference
@@ -653,9 +746,7 @@ impl Signing {
 
                             // Broadcast verification result
                             sender
-                                .broadcast(SigningProtocolMessage::VerificationResult {
-                                    success: all_match,
-                                })
+                                .broadcast(Message::VerificationResult { success: all_match })
                                 .await
                                 .map_err(Error::Network)?;
                         }
@@ -670,18 +761,18 @@ impl Signing {
                     // Post-transition actions
                     match (&self.fsm.state(), output_event) {
                         (
-                            signing_protocol::State::ComparingCandidates,
-                            Some(signing_protocol::Output::BroadcastCandidatesSet),
+                            fsm::State::ComparingCandidates,
+                            Some(fsm::Output::BroadcastCandidatesSet),
                         ) => {
                             // Broadcast our candidate set
                             sender
-                                .broadcast(SigningProtocolMessage::CandidateSet {
+                                .broadcast(Message::CandidateSet {
                                     candidates: context.signing_candidates.clone(),
                                 })
                                 .await
                                 .map_err(Error::Network)?;
                         }
-                        (signing_protocol::State::Idle, _) => {
+                        (fsm::State::Idle, _) => {
                             println!("Committee ready for signing operations.");
                             context.reset();
                         }
@@ -689,6 +780,7 @@ impl Signing {
                     }
                 }
             }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 }
@@ -728,37 +820,6 @@ impl Signing {
 /// * `VerificationResult` - Signature verification status
 /// * `EndSigning` - Session termination signal
 ///
-/// # State Updates
-///
-/// For each message type, the following state updates occur:
-///
-/// * **SignRequest**
-///   - Stores message to be signed
-///   - Triggers SignRequestReceived event
-///
-/// * **SigningAvailable**
-///   - Adds sender to available candidates
-///   - Triggers CandidateAvailable event
-///
-/// * **CandidateSet**
-///   - Updates received candidate sets
-///   - Triggers CandidateSetReceived event
-///
-/// * **QuorumApproved**
-///   - Records sender's approval
-///   - Triggers QuorumApproved event
-///
-/// * **QuorumDeclined**
-///   - Triggers QuorumDeclined event
-///
-/// * **SignatureShare**
-///   - Stores received signature share
-///   - Updates signature collection state
-///
-/// * **VerificationResult**
-///   - Updates verification status
-///   - Triggers VerificationComplete event
-///
 /// # Error Handling
 ///
 /// The function handles several error conditions:
@@ -781,12 +842,12 @@ impl Signing {
 /// - Network errors are propagated to the caller
 ///
 async fn handle_messages(
-    context: Arc<RwLock<SigningEnv>>,
-    mut receiver: Receiver<SigningProtocolMessage>,
+    context: Arc<RwLock<Context>>,
+    mut receiver: Receiver<Message>,
 ) -> Result<(), Error> {
     pub async fn handle_message(
-        incoming: Incoming<SigningProtocolMessage>,
-        context: &Arc<RwLock<SigningEnv>>,
+        incoming: Incoming<Message>,
+        context: &Arc<RwLock<Context>>,
     ) -> Result<(), Error> {
         // Obtain a write lock
         let mut context = context.write().await;
@@ -796,11 +857,11 @@ async fn handle_messages(
 
         // Match the message content
         let input = match incoming.msg {
-            SigningProtocolMessage::SignRequest { message } => {
+            Message::SignRequest { message } => {
                 context.current_message = Some(message);
                 Input::SignRequestReceived
             }
-            SigningProtocolMessage::SigningAvailable => {
+            Message::SigningAvailable => {
                 if !context.is_deadline_elapsed() {
                     context.signing_candidates.insert(pid);
                     println!(
@@ -816,30 +877,30 @@ async fn handle_messages(
                     Input::CollectionTimeout
                 }
             }
-            SigningProtocolMessage::CandidateSet { candidates } => {
+            Message::CandidateSet { candidates } => {
                 println!("¬ Adding candidate set from party {}", pid);
 
                 context.received_candidates.insert(pid, candidates);
                 Input::CandidateSetReceived
             }
-            SigningProtocolMessage::QuorumApproved => {
+            Message::QuorumApproved => {
                 context.quorum_approved.insert(pid);
                 Input::QuorumApproved
             }
-            SigningProtocolMessage::QuorumDeclined => {
+            Message::QuorumDeclined => {
                 println!("¬ Quorum declined by party {}", pid);
                 Input::QuorumDeclined
             }
-            SigningProtocolMessage::EndSigning => {
+            Message::EndSigning => {
                 println!("¬ Signing-ended by party {}", pid);
                 Input::EndSigning
             }
-            SigningProtocolMessage::SignatureShare { sig_share } => {
+            Message::SignatureShare { sig_share } => {
                 println!("¬ Received signature share from party {}", pid);
                 context.received_signatures.insert(pid, sig_share);
                 Input::EndSigning
             }
-            SigningProtocolMessage::VerificationResult { success } => {
+            Message::VerificationResult { success } => {
                 println!(
                     "¬ Received verification result from party {}: {}",
                     pid, success
@@ -882,10 +943,10 @@ async fn handle_messages(
 ///
 /// # Parameters
 /// * `message` - The message to be signed
-/// * `signing_parties` - List of parties participating in signing
+/// * `signing_parties` - List of parties participating in signing (lowest 3 party IDs)
 /// * `storage` - Storage for cryptographic keys
 /// * `party_id` - ID of the current party
-/// * `delivery` - Communication channel for protocol messages
+/// * `delivery` - P2P channel for protocol messages
 ///
 /// # Returns
 /// A Result containing the generated signature share or an error
@@ -893,14 +954,14 @@ async fn handle_messages(
 /// # Errors
 /// Returns an error if:
 /// * Signature generation fails
-/// * Communication errors occur
+/// * P2P communication errors occur
 /// * Key retrieval fails
 async fn handle_signing_request(
     message: &[u8],
     signing_parties: &[u16],
     storage: &KeyStorage,
     party_id: u16,
-    delivery: WsDelivery<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>,
+    delivery: P2PDelivery<cggmp21::signing::msg::Msg<Secp256k1, Sha256>>,
 ) -> Result<Signature<Secp256k1>, Error> {
     println!("- Handling signing request from party ");
 

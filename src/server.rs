@@ -422,8 +422,9 @@ impl WsServer {
                     party_id: receiver_id,
                     session_id: party_session.session_id,
                 }) {
-                    let encoded = bincode::serialize(&NetworkMessage::WireMessage(wire_msg.clone()))
-                        .expect("Failed to serialize wire message");
+                    let encoded =
+                        bincode::serialize(&NetworkMessage::WireMessage(wire_msg.clone()))
+                            .expect("Failed to serialize wire message");
                     let _ = client_session
                         .sender
                         .unbounded_send(Message::Binary(encoded));
@@ -441,8 +442,9 @@ impl WsServer {
                             "[S{}] Broadcast from party {}",
                             session.session_id, session.party_id
                         );
-                        let encoded = bincode::serialize(&NetworkMessage::WireMessage(wire_msg.clone()))
-                            .expect("Failed to serialize wire message");
+                        let encoded =
+                            bincode::serialize(&NetworkMessage::WireMessage(wire_msg.clone()))
+                                .expect("Failed to serialize wire message");
                         let _ = client_session
                             .sender
                             .unbounded_send(Message::Binary(encoded));

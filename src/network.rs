@@ -1,14 +1,47 @@
+//! Network communication layer for distributed protocol operations.
+//!
+//! This module provides the core networking abstractions used by the protocol,
+//! implementing message delivery, routing, and session management. It supports:
+//! - Asynchronous message delivery with ordering guarantees
+//! - Session-based message routing and management
+//! - Automatic message ID generation and validation
+//! - Error handling and recovery mechanisms
+//!
+//! # Architecture
+//!
+//! The module is built around several key components:
+//! * Sender - Handles outgoing message delivery
+//! * Receiver - Processes incoming messages with ordering
+//! * StreamDelivery - Combines send/receive capabilities
+//! * MessageIdGenerator - Ensures message ordering
+//!
+//! # Example Usage
+//!
+//! ```rust,no_run
+//! use crate::network::{StreamDelivery, NetworkError};
+//!
+//! async fn example<S>(stream: S) -> Result<(), NetworkError>
+//! where
+//!     S: Stream<Item = NetworkMessage> + Sink<NetworkMessage>,
+//! {
+//!     let delivery = StreamDelivery::new(stream, 1, 1).await?;
+//!     let (receiver, sender) = delivery.split();
+//!     // Use sender and receiver for message exchange
+//!     Ok(())
+//! }
+//! ```
 use crate::message::{
     MessageIdGenerator, NetworkMessage, PartySession, RoundBasedWireMessage, SessionMessage,
     WireMessage,
 };
-use tokio::sync::{mpsc,mpsc::unbounded_channel};
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use round_based::{Delivery, Incoming, Outgoing};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use std::{marker::PhantomData, pin::Pin};
+use tokio::sync::{mpsc, mpsc::unbounded_channel};
 
+/// Global message ID generator for sequence tracking
 pub static MESSAGE_ID_GEN: MessageIdGenerator = MessageIdGenerator::new();
 
 /// Errors that can occur during network operations.
@@ -31,6 +64,7 @@ pub enum NetworkError {
     InvalidMessageId { expected: u64, actual: u64 },
 }
 
+
 /// Message sender component.
 ///
 /// Handles sending network messages to other parties through the connection.
@@ -40,9 +74,13 @@ pub struct Sender<M>
 where
     M: Serialize + for<'de> Deserialize<'de>,
 {
+    /// Channel for sending network messages
     pub sender: mpsc::UnboundedSender<NetworkMessage>,
+    /// Unique identifier for this party
     pub party_id: u16,
+    /// Session identifier
     pub session_id: u16,
+    /// Type parameter marker
     pub _phantom: PhantomData<M>,
 }
 
@@ -51,6 +89,12 @@ where
     M: Serialize + for<'de> Deserialize<'de> + Unpin,
 {
     /// Broadcasts a message using the Sink trait
+    ///
+    /// # Arguments
+    /// * `msg` - Message to broadcast to all parties
+    ///
+    /// # Returns
+    /// Result indicating success or network error
     pub async fn broadcast(&mut self, msg: M) -> Result<(), NetworkError> {
         self.send(WireMessage::new_broadcast(
             &MESSAGE_ID_GEN,
@@ -60,7 +104,14 @@ where
         .await
     }
 
-    /// Sends a message to a peer using the Sink trait
+    /// Sends a message to a specific peer using the Sink trait
+    ///
+    /// # Arguments
+    /// * `msg` - Message to send
+    /// * `party_id` - ID of the recipient party
+    ///
+    /// # Returns
+    /// Result indicating success or network error
     pub async fn send_to(&mut self, msg: M, party_id: u16) -> Result<(), NetworkError> {
         self.send(WireMessage::new_p2p(
             &MESSAGE_ID_GEN,
@@ -71,6 +122,9 @@ where
         .await
     }
     /// Registers this party with the session
+    ///
+    /// # Returns
+    /// Result indicating success or network error
     pub async fn register(&self) -> Result<(), NetworkError> {
         let reg_msg = SessionMessage::Register {
             session: PartySession {
@@ -86,36 +140,41 @@ where
         Ok(())
     }
 
+    /// Returns the party ID of this sender
     pub fn get_party_id(&self) -> u16 {
         self.party_id
     }
 }
 
+/// Resource cleanup implementation for Sender
 impl<M> Drop for Sender<M>
 where
     M: Serialize + for<'de> Deserialize<'de>,
 {
+    /// Performs cleanup when the sender is dropped
+    ///
+    /// Sends unregistration message and allows time for delivery
     fn drop(&mut self) {
-            let unreg_msg = SessionMessage::Unregister {
-                session: PartySession {
-                    party_id: self.party_id,
-                    session_id: self.session_id,
-                },
-            };
+        let unreg_msg = SessionMessage::Unregister {
+            session: PartySession {
+                party_id: self.party_id,
+                session_id: self.session_id,
+            },
+        };
 
-        let _ = self
-            .sender
-            .send(NetworkMessage::SessionMessage(unreg_msg));
+        let _ = self.sender.send(NetworkMessage::SessionMessage(unreg_msg));
         std::thread::sleep(Duration::from_secs(1));
     }
 }
 
+/// Sink implementation for round-based protocol messages
 impl<M> Sink<Outgoing<M>> for Sender<M>
 where
     M: serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
     type Error = NetworkError;
 
+    /// Checks if the sink is ready to accept a new message
     fn poll_ready(
         self: Pin<&mut Self>,
         _: &mut std::task::Context<'_>,
@@ -123,6 +182,10 @@ where
         std::task::Poll::Ready(Ok(()))
     }
 
+    /// Initiates sending of a protocol message
+    ///
+    /// # Arguments
+    /// * `item` - Outgoing protocol message
     fn start_send(self: Pin<&mut Self>, item: Outgoing<M>) -> Result<(), Self::Error> {
         self.sender
             .send(NetworkMessage::WireMessage(
@@ -135,6 +198,7 @@ where
             .map_err(|_| NetworkError::ChannelClosed)
     }
 
+    /// Flushes pending messages
     fn poll_flush(
         self: Pin<&mut Self>,
         _: &mut std::task::Context<'_>,
@@ -142,14 +206,7 @@ where
         std::task::Poll::Ready(Ok(()))
     }
 
-    /// Attempts to close the sink, preventing further messages from being sent.
-    ///
-    /// In this implementation, closing is a no-op as the channel remains open
-    /// until dropped.
-    ///
-    /// # Returns
-    ///
-    /// Always returns `Poll::Ready(Ok(()))` as there is no specific close operation
+    /// Closes the sink
     fn poll_close(
         self: Pin<&mut Self>,
         _: &mut std::task::Context<'_>,
@@ -158,12 +215,31 @@ where
     }
 }
 
+/// Sink implementation for direct wire message transmission.
+///
+/// This implementation enables the direct sending of wire-format messages,
+/// bypassing the usual message serialization step. This is useful for
+/// forwarding messages or implementing custom message routing.
+///
+/// # Type Parameters
+///
+/// * `M` - The underlying message type for type safety, though not directly used
+///         in this implementation
+///
+///
+/// # Error Handling
+///
+/// The implementation handles several error cases:
+/// - Channel closure
+/// - Message conversion failures
+/// - Send buffer full conditions
 impl<M> Sink<WireMessage> for Sender<M>
 where
     M: serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
     type Error = NetworkError;
 
+    /// Checks if the sink is ready to accept a new message
     fn poll_ready(
         self: Pin<&mut Self>,
         _: &mut std::task::Context<'_>,
@@ -171,12 +247,25 @@ where
         std::task::Poll::Ready(Ok(()))
     }
 
+    /// Initiates sending of a wire-format message.
+    ///
+    /// Converts the WireMessage to a NetworkMessage and sends it through
+    /// the underlying channel.
+    ///
+    /// # Arguments
+    /// * `wire_msg` - The wire-format message to send
+    ///
+    /// # Returns
+    /// * `Ok(())` if the message was successfully queued
+    /// * `Err(NetworkError::<error>>)` network error
+    ///
     fn start_send(self: Pin<&mut Self>, wire_msg: WireMessage) -> Result<(), Self::Error> {
         self.sender
             .send(NetworkMessage::WireMessage(wire_msg))
             .map_err(|_| NetworkError::ChannelClosed)
     }
 
+    /// Flushes pending messages
     fn poll_flush(
         self: Pin<&mut Self>,
         _: &mut std::task::Context<'_>,
@@ -184,6 +273,7 @@ where
         std::task::Poll::Ready(Ok(()))
     }
 
+    /// Closes the sink
     fn poll_close(
         self: Pin<&mut Self>,
         _: &mut std::task::Context<'_>,
@@ -197,7 +287,9 @@ where
 /// Handles receiving and validating messages from other parties.
 /// Implements the `Stream` trait for incoming messages.
 pub struct Receiver<M> {
+    /// Channel for receiving network messages
     pub receiver: mpsc::UnboundedReceiver<NetworkMessage>,
+    /// Type parameter marker
     pub _phantom: PhantomData<M>,
 }
 
@@ -241,7 +333,7 @@ where
 {
     type Item = Result<Incoming<M>, NetworkError>;
 
-    /// Attempts to receive the next message from the WebSocket connection.
+    /// Attempts to receive the next message.
     ///
     /// This method performs the following steps:
     /// 1. Receives raw data from the channel
@@ -253,14 +345,9 @@ where
     /// # Returns
     ///
     /// - `Poll::Ready(Some(Ok(message)))`: A message was successfully received
-    /// - `Poll::Ready(Some(Err(error)))`: An error occurred while processing the message
+    /// - `Poll::Ready(Some(Err(error)))`: An error occurred while processing
     /// - `Poll::Ready(None)`: The stream has ended (channel closed)
     /// - `Poll::Pending`: No message is currently available
-    ///
-    /// # Errors
-    ///
-    /// - `NetworkError::Connection`: Message deserialization failed
-    /// - `NetworkError::InvalidMessageId`: Message arrived out of sequence
     fn poll_next(
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -307,6 +394,7 @@ pub enum DeliveryError {
     Processing(String),
 }
 
+
 /// Stream-based delivery mechanism implementing `round_based::Delivery`.
 ///
 /// Provides the main interface for stream-based network communication,
@@ -318,9 +406,13 @@ where
     S: Stream<Item = Result<NetworkMessage, E>> + Sink<NetworkMessage, Error = E> + Unpin,
     E: std::error::Error + 'static,
 {
+    /// Message sender component
     sender: Sender<M>,
+    /// Message receiver component
     receiver: Receiver<M>,
+    /// Stream type marker
     _stream: PhantomData<S>,
+    /// Error type marker
     _error: PhantomData<E>,
 }
 
