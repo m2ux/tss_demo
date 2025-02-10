@@ -219,7 +219,7 @@ async fn run_committee_mode(party_id: u16, bootstrap_addresses: Vec<String>) -> 
 
 /// Runs the application in service mode
 ///
-/// Starts a service node that can request signatures from the committee
+/// Starts a service node that can request signing operations from the committee
 /// through the P2P network.
 ///
 /// # Arguments
