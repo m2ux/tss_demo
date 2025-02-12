@@ -106,4 +106,16 @@ impl ProtocolTopic {
     pub fn as_ident_topic(&self) -> &IdentTopic {
         &self.inner
     }
+
+    /// Creates a new ProtocolTopic from a TopicHash and protocol string
+    ///
+    /// # Arguments
+    /// * `topic_hash` - The hash of the topic
+    /// * `protocol` - The protocol identifier
+    pub fn from_protocol(topic_hash: TopicHash, protocol: impl Into<String>) -> Self {
+        Self {
+            inner: IdentTopic::new(topic_hash.to_string()),
+            protocol: protocol.into(),
+        }
+    }
 }

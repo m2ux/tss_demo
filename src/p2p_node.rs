@@ -65,6 +65,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 /// Configuration for P2P network setup
@@ -104,6 +105,16 @@ pub struct SessionInfo {
     pub session_id: u16,
     /// Channel for sending messages to this session
     pub sender: mpsc::UnboundedSender<Vec<u8>>,
+}
+
+impl SessionInfo {
+    fn new(party_id: u16, session_id: u16, sender: UnboundedSender<Vec<u8>>) -> Self {
+        SessionInfo {
+            party_id,
+            session_id,
+            sender,
+        }
+    }
 }
 
 // Implement the trait for SessionInfo
@@ -415,7 +426,7 @@ impl P2PNode {
                 Some(_) => {}
                 // No events available, add small delay to prevent busy loop
                 None => {
-                    // Small delay to prevent tight loop 
+                    // Small delay to prevent tight loop
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }
@@ -777,28 +788,16 @@ impl P2PNode {
     /// - Topic parsing is performed immutably
     ///
     async fn handle_incoming_message(node: &Arc<Self>, topic_hash: TopicHash, data: Vec<u8>) {
-        let sessions = node.sessions.read().await;
-        let topic = ProtocolTopic::from_ident_topic(
-            IdentTopic::new(topic_hash.to_string()),
-            node.protocol.clone(),
-        );
-
         debug!("Incoming message on topic: {}", topic.hash());
+        
+        let sessions = node.sessions.read().await;
+        let topic = ProtocolTopic::from_protocol(topic_hash, node.protocol.clone());
 
-        // Infer message type based on topic format
-        if topic.is_broadcast() {
-            // Broadcast message - forward to all sessions with matching session_id
+        // Forward valid topic to relevant session
+        if topic.is_broadcast() || topic.is_p2p() {
             if let Some(session) = sessions.get(&topic.hash()) {
                 session.forward_message(data);
-            }
-        } else if topic.is_p2p() {
-            // P2P message - forward only to the specific session matching the topic
-            if let Some(session) = sessions.get(&topic.hash()) {
-                // Forward the network message
-                session.forward_message(data);
-            }
-        } else {
-            // TODO: Error: Unrecognised topic
+            } 
         }
     }
 
@@ -815,16 +814,11 @@ impl P2PNode {
         &self,
         party_id: u16,
         session_id: u16,
-        sender: mpsc::UnboundedSender<Vec<u8>>,
+        sender: UnboundedSender<Vec<u8>>,
     ) -> Result<(), P2PError> {
         let broadcast_topic = ProtocolTopic::new_broadcast(&self.protocol, session_id);
         let p2p_topic = ProtocolTopic::new_p2p(&self.protocol, party_id, session_id);
-
-        let session_info = SessionInfo {
-            party_id,
-            session_id,
-            sender,
-        };
+        let session_info = SessionInfo::new(party_id, session_id, sender);
 
         let mut swarm = self.swarm.lock().await;
 
