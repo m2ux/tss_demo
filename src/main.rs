@@ -48,6 +48,7 @@ mod service;
 mod signing;
 mod storage;
 mod websocket;
+mod p2p_topic;
 
 use crate::error::Error;
 use crate::p2p_node::P2PNode;
