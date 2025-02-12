@@ -789,7 +789,7 @@ impl P2PNode {
     ///
     async fn handle_incoming_message(node: &Arc<Self>, topic_hash: TopicHash, data: Vec<u8>) {
         debug!("Incoming message on topic: {}", topic.hash());
-        
+
         let sessions = node.sessions.read().await;
         let topic = ProtocolTopic::from_protocol(topic_hash, node.protocol.clone());
 
@@ -797,7 +797,7 @@ impl P2PNode {
         if topic.is_broadcast() || topic.is_p2p() {
             if let Some(session) = sessions.get(&topic.hash()) {
                 session.forward_message(data);
-            } 
+            }
         }
     }
 
