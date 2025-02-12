@@ -40,6 +40,7 @@
 //! ```
 
 use crate::p2p_behaviour::{AgentBehaviour, AgentBehaviourEvent};
+use crate::p2p_topic::ProtocolTopic;
 use libp2p::identify::{
     Behaviour as IdentifyBehavior, Config as IdentifyConfig, Event as IdentifyEvent,
 };
@@ -49,8 +50,8 @@ use libp2p::kad::{
 };
 use libp2p::noise::Config as NoiseConfig;
 use libp2p::{
-    tcp::Config as TcpConfig, yamux, yamux::Config as YamuxConfig, Multiaddr,
-    StreamProtocol, Swarm, SwarmBuilder,
+    tcp::Config as TcpConfig, yamux::Config as YamuxConfig, Multiaddr, StreamProtocol, Swarm,
+    SwarmBuilder,
 };
 use libp2p_gossipsub as gossipsub;
 use libp2p_gossipsub::{Behaviour, Event as GossipEvent, IdentTopic, TopicHash};
@@ -58,8 +59,7 @@ use libp2p_identity::{self, Keypair, PeerId};
 use libp2p_kad::{GetProvidersOk, QueryResult, RecordKey};
 use libp2p_swarm::SwarmEvent;
 use log::{debug, info, warn};
-use rand::seq::SliceRandom;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
@@ -67,12 +67,6 @@ use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
-/// Message type for distinguishing broadcast from point-to-point messages
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]
-pub enum MessageType {
-    Broadcast,
-    P2P,
-}
 /// Configuration for P2P network setup
 #[derive(Clone, Debug)]
 pub struct P2PConfig {
@@ -116,11 +110,12 @@ pub struct SessionInfo {
 impl SessionInfo {
     fn forward_message(&self, data: Vec<u8>) {
         if let Err(e) = self.sender.send(data) {
-            println!("Failed to forward message: {}", e);
+            info!("Failed to forward message: {}", e);
         }
     }
 }
 
+/// Clone implementation for SessionInfo
 impl Clone for SessionInfo {
     fn clone(&self) -> Self {
         Self {
@@ -136,6 +131,10 @@ impl Clone for SessionInfo {
 /// Manages peer connections, message routing, and protocol operations.
 /// Provides topic-based pub/sub and session management capabilities.
 pub struct P2PNode {
+    /// Protocol identifier
+    pub protocol: String,
+    /// Bootstrap completion flag
+    pub bootstrap_completed: AtomicBool,
     /// Network swarm managing peer connections and protocols
     swarm: Arc<Mutex<Swarm<AgentBehaviour>>>,
     /// Node identity keypair
@@ -144,15 +143,9 @@ pub struct P2PNode {
     sessions: Arc<RwLock<HashMap<TopicHash, SessionInfo>>>,
     /// Node running state
     running: Arc<RwLock<bool>>,
-    /// Protocol identifier
-    pub protocol: String,
     /// Known peers and their addresses
     peers: Arc<RwLock<HashMap<PeerId, Vec<Multiaddr>>>>,
-    /// Bootstrap process completion flag
-    bootstrap_completed: AtomicBool,
 }
-
-const CGGMP_KAD_PROTOCOL: &'static str = "/cggmp/kad/1.0.0";
 
 impl P2PNode {
     /// Constants for peer discovery
@@ -173,8 +166,7 @@ impl P2PNode {
     pub async fn new(config: P2PConfig) -> Result<Arc<Self>, P2PError> {
         // Create identity keypair
         let keypair = Keypair::generate_ed25519();
-        //let kad_protocol_id = format!("/{}/kad/1.0.0", config.protocol);
-        let kad_protocol = StreamProtocol::new(CGGMP_KAD_PROTOCOL);
+        let kad_protocol = StreamProtocol::new("/kad/1.0.0");
 
         let mut swarm = SwarmBuilder::with_existing_identity(keypair.clone())
             .with_tokio()
@@ -182,7 +174,7 @@ impl P2PNode {
             .map_err(|e| P2PError::Protocol(e.to_string()))?
             .with_behaviour(|key| {
                 let local_peer_id = PeerId::from(key.clone().public());
-                println!("Local peer ID: {local_peer_id}");
+                info!("Local peer ID: {local_peer_id}");
 
                 // Set up the Kademlia behavior for peer discovery.
                 let mut kad_config = KadConfig::new(kad_protocol);
@@ -237,7 +229,7 @@ impl P2PNode {
                 swarm
                     .dial(addr.clone())
                     .map_err(|e| P2PError::Transport(e.to_string()))?;
-                println!("Dialed to: {addr}");
+                info!("Dialed to: {addr}");
             }
         }
 
@@ -255,7 +247,7 @@ impl P2PNode {
         let node_clone = Arc::clone(&node);
         tokio::spawn(async move {
             if let Err(e) = Self::run(node_clone).await {
-                println!("P2P node start error: {}", e);
+                info!("P2P node start error: {}", e);
             }
         });
 
@@ -316,7 +308,7 @@ impl P2PNode {
     ///
     /// Handles network events, peer connections, and message routing
     async fn run(node: Arc<Self>) -> Result<(), P2PError> {
-        println!("Running");
+        info!("Running");
         while *node.running.read().await {
             // A future that polls the swarm without holding the lock
             let event = {
@@ -333,22 +325,23 @@ impl P2PNode {
             };
 
             match event {
+                // Handle Identify protocol events for peer discovery and identification
                 Some(SwarmEvent::Behaviour(AgentBehaviourEvent::Identify(event))) => {
                     P2PNode::handle_identify_event(Arc::clone(&node), event).await;
                 }
+                // Handle GossipSub events for pub/sub messaging
                 Some(SwarmEvent::Behaviour(AgentBehaviourEvent::Gossipsub(event))) => {
                     P2PNode::handle_gossipsub_event(Arc::clone(&node), event).await;
                 }
+                // Handle Kademlia DHT events for peer discovery and routing
                 Some(SwarmEvent::Behaviour(AgentBehaviourEvent::Kad(event))) => {
                     P2PNode::handle_kadelia_event(Arc::clone(&node), event).await;
                 }
+                // Handle new peer connections and bootstrap discovery
                 Some(SwarmEvent::ConnectionEstablished {
                     peer_id, endpoint, ..
                 }) => {
-                    info!(
-                        "Connection established with peer: {}",
-                        peer_id
-                    );
+                    info!("Connection established with peer: {}", peer_id);
 
                     // Only proceed with bootstrap discovery if:
                     // 1. This is an outbound connection (we initiated it)
@@ -366,6 +359,7 @@ impl P2PNode {
                         }
                     }
                 }
+                // Handle peer disconnections and cleanup
                 Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
                     info!("Connection closed with peer: {}", peer_id);
 
@@ -392,12 +386,14 @@ impl P2PNode {
                         );
                     }
                 }
+                // Handle new local listening addresses
                 Some(SwarmEvent::NewListenAddr {
                     listener_id,
                     address,
                 }) => {
                     info!("New listen address: ({listener_id}): {address}");
                 }
+                // Handle incoming connection attempts
                 Some(SwarmEvent::IncomingConnection {
                     local_addr,
                     send_back_addr,
@@ -408,15 +404,18 @@ impl P2PNode {
                         send_back_addr, local_addr
                     );
                 }
+                // Handle outgoing connection attempts
                 Some(SwarmEvent::Dialing {
                     peer_id,
                     connection_id: _,
                 }) => {
                     debug!("Dialing peer: {:?}", peer_id);
                 }
+                // Ignore other swarm events
                 Some(_) => {}
+                // No events available, add small delay to prevent busy loop
                 None => {
-                    // Small delay to prevent tight loop
+                    // Small delay to prevent tight loop 
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }
@@ -435,6 +434,7 @@ impl P2PNode {
     /// Processes peer discovery and routing table updates
     pub async fn handle_kadelia_event(node: Arc<Self>, event: KadEvent) {
         match event {
+            // Handle discovery of a directly routable peer with known address
             KadEvent::RoutablePeer { peer, address } => {
                 info!("Found routable peer: {} at {}", peer, address);
                 let mut swarm = node.swarm.lock().await;
@@ -443,8 +443,10 @@ impl P2PNode {
                     info!("Failed to dial discovered peer: {}", e);
                 }
             }
+            // Handle results from outbound Kademlia queries
             KadEvent::OutboundQueryProgressed { result, .. } => {
                 match result {
+                    // Handle response when searching for closest peers to a key
                     QueryResult::GetClosestPeers(Ok(ok)) => {
                         debug!("Discovered {} peers near key {:?}", ok.peers.len(), ok.key);
                         for peer_info in ok.peers {
@@ -465,8 +467,10 @@ impl P2PNode {
                             }
                         }
                     }
+                    // Handle response when querying for providers of a specific key
                     QueryResult::GetProviders(Ok(result)) => {
                         match result {
+                            // Found peers providing the requested key
                             GetProvidersOk::FoundProviders { key, providers } => {
                                 debug!("Found {} providers for key {:?}", providers.len(), key);
                                 for peer in providers {
@@ -481,6 +485,7 @@ impl P2PNode {
                                     }
                                 }
                             }
+                            // No providers found, but received list of closest peers
                             GetProvidersOk::FinishedWithNoAdditionalRecord { closest_peers } => {
                                 debug!(
                                     "No providers found, but got {} closest peers",
@@ -503,9 +508,11 @@ impl P2PNode {
                             }
                         }
                     }
+                    // Ignore other query results
                     _ => {}
                 }
             }
+            // Ignore other Kademlia events
             _ => {}
         }
     }
@@ -515,6 +522,7 @@ impl P2PNode {
     /// Processes pub/sub messages and subscription changes
     pub async fn handle_gossipsub_event(node: Arc<Self>, event: GossipEvent) {
         match event {
+            // Handle incoming messages from the network
             GossipEvent::Message {
                 propagation_source: _propagation_source,
                 message_id: _message_id,
@@ -522,6 +530,7 @@ impl P2PNode {
             } => {
                 Self::handle_incoming_message(&node, message.topic, message.data).await;
             }
+            // Handle peer subscription events
             GossipEvent::Subscribed { peer_id, topic } => {
                 debug!(
                     "Peer {} subscribed to topic: {}",
@@ -529,6 +538,7 @@ impl P2PNode {
                     topic.to_string()
                 );
             }
+            // Handle peer unsubscription events
             GossipEvent::Unsubscribed { peer_id, topic } => {
                 debug!(
                     "Peer {} unsubscribed from topic: {}",
@@ -536,6 +546,7 @@ impl P2PNode {
                     topic.to_string()
                 );
             }
+            // Ignore other gossipsub events
             _ => {}
         }
     }
@@ -545,15 +556,20 @@ impl P2PNode {
     /// Processes peer information updates and address registration
     pub async fn handle_identify_event(node: Arc<Self>, event: IdentifyEvent) {
         match event {
+            // Handle sent identify protocol messages
             IdentifyEvent::Sent {
                 connection_id: _connection_id,
                 peer_id,
             } => debug!("IdentifyEvent:Sent: {peer_id}"),
+
+            // Handle pushed identify updates
             IdentifyEvent::Pushed {
                 connection_id: _connection_id,
                 peer_id,
                 info,
             } => debug!("IdentifyEvent:Pushed: {peer_id} | {info:?}"),
+
+            // Handle received identify information from remote peers
             IdentifyEvent::Received {
                 connection_id: _connection_id,
                 peer_id,
@@ -561,6 +577,7 @@ impl P2PNode {
             } => {
                 debug!("IdentifyEvent:Received: {peer_id} | {info:?}");
                 {
+                    // Update peers map with newly received addresses
                     let mut peers = node.peers.write().await;
                     if peers.insert(peer_id, info.clone().listen_addrs).is_none() {
                         debug!(
@@ -570,16 +587,20 @@ impl P2PNode {
                     }
                 }
 
+                // Register each address with Kademlia DHT
                 for addr in info.clone().listen_addrs {
                     let mut swarm = node.swarm.lock().await;
                     let agent_routing = swarm.behaviour_mut().register(&peer_id, addr.clone());
                     match agent_routing {
+                        // Log failures to add addresses to routing table
                         RoutingUpdate::Failed => {
                             warn!("IdentifyReceived: Failed to register address to Kademlia")
                         }
+                        // Log pending address validations
                         RoutingUpdate::Pending => {
                             debug!("IdentifyReceived: Register address pending")
                         }
+                        // Log successful address registrations
                         RoutingUpdate::Success => {
                             debug!("IdentifyReceived: {addr}: Success register address");
                         }
@@ -588,6 +609,7 @@ impl P2PNode {
                     _ = swarm.behaviour_mut().register(&peer_id, addr.clone());
                 }
             }
+            // Ignore other identify events
             _ => {}
         }
     }
@@ -632,28 +654,6 @@ impl P2PNode {
         Ok(())
     }
 
-    /// Performs a discovery cycle
-    ///
-    /// Queries random peers and refreshes protocol providers
-    async fn perform_discovery(&self) -> Result<(), P2PError> {
-        // Get current peers for discovery
-        let peers: Vec<PeerId> = self.peers.read().await.keys().cloned().collect();
-
-        let mut swarm = self.swarm.lock().await;
-
-        // Query random peers to expand network view
-        for peer_id in peers.choose_multiple(&mut rand::thread_rng(), 3) {
-            swarm.behaviour_mut().get_closest_peers(*peer_id);
-        }
-
-        // Refresh protocol-specific discovery
-        let protocol_key = self.get_protocol_key();
-        let mut swarm = self.swarm.lock().await;
-        swarm.behaviour_mut().get_providers(protocol_key);
-
-        Ok(())
-    }
-
     /// Start periodic protocol announcements
     ///
     /// Announces node presence to the network periodically
@@ -663,10 +663,10 @@ impl P2PNode {
             info!("Starting periodic protocol announcements");
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             while let Ok(true) = node.running.try_read().map(|guard| *guard) {
-                let announcement_result = {
+                let _announcement_result = {
                     // Scope the lock to ensure it's released quickly
-                    let protocol_key = node.get_protocol_key();
                     if let Ok(mut swarm) = node.swarm.try_lock() {
+                        let protocol_key = node.get_protocol_key();
                         match swarm.behaviour_mut().start_providing(protocol_key) {
                             Ok(query_id) => {
                                 debug!(
@@ -783,7 +783,7 @@ impl P2PNode {
             node.protocol.clone(),
         );
 
-        debug!("Incoming message on topic: {}", topic.inner.hash());
+        debug!("Incoming message on topic: {}", topic.hash());
 
         // Infer message type based on topic format
         if topic.is_broadcast() {
@@ -802,16 +802,6 @@ impl P2PNode {
         }
     }
 
-    /// Creates a broadcast topic for a session
-    fn get_broadcast_topic(&self, session_id: u16) -> ProtocolTopic {
-        ProtocolTopic::new_broadcast(&self.protocol, session_id)
-    }
-
-    /// Creates a P2P topic for a specific party in a session
-    fn get_p2p_topic(&self, party_id: u16, session_id: u16) -> ProtocolTopic {
-        ProtocolTopic::new_p2p(&self.protocol, session_id, party_id)
-    }
-
     /// Subscribes to relevant topics for a party in a session
     ///
     /// # Arguments
@@ -827,9 +817,8 @@ impl P2PNode {
         session_id: u16,
         sender: mpsc::UnboundedSender<Vec<u8>>,
     ) -> Result<(), P2PError> {
-        // Create topics using the new Topic struct
-        let broadcast_topic = self.get_broadcast_topic(session_id);
-        let p2p_topic = self.get_p2p_topic(party_id, session_id);
+        let broadcast_topic = ProtocolTopic::new_broadcast(&self.protocol, session_id);
+        let p2p_topic = ProtocolTopic::new_p2p(&self.protocol, party_id, session_id);
 
         let session_info = SessionInfo {
             party_id,
@@ -873,8 +862,8 @@ impl P2PNode {
         session_id: u16,
     ) -> Result<(), P2PError> {
         // Create topics using the existing topic creation methods
-        let broadcast_topic = self.get_broadcast_topic(session_id);
-        let p2p_topic = self.get_p2p_topic(party_id, session_id);
+        let broadcast_topic = ProtocolTopic::new_broadcast(&self.protocol, session_id);
+        let p2p_topic = ProtocolTopic::new_p2p(&self.protocol, party_id, session_id);
 
         let mut swarm = self.swarm.lock().await;
 
@@ -933,7 +922,7 @@ impl P2PNode {
         match recipient {
             None => {
                 // Broadcast message
-                let topic = self.get_broadcast_topic(session_id);
+                let topic = ProtocolTopic::new_broadcast(&self.protocol, session_id);
                 swarm
                     .behaviour_mut()
                     .publish(topic.as_ident_topic().clone(), msg_data)
@@ -942,7 +931,7 @@ impl P2PNode {
             }
             Some(party_id) => {
                 // P2P message
-                let topic = self.get_p2p_topic(party_id, session_id);
+                let topic = ProtocolTopic::new_p2p(&self.protocol, party_id, session_id);
                 swarm
                     .behaviour_mut()
                     .publish(topic.as_ident_topic().clone(), msg_data)
@@ -951,97 +940,5 @@ impl P2PNode {
             }
         }
         Ok(())
-    }
-}
-
-/// Represents a gossipsub topic with protocol-specific formatting
-#[derive(Clone, Debug)]
-pub struct ProtocolTopic {
-    /// The underlying libp2p IdentTopic
-    inner: IdentTopic,
-    /// Protocol identifier (e.g., "cggmp")
-    protocol: String,
-}
-
-impl ProtocolTopic {
-    /// Creates a new broadcast topic
-    /// Format: "{protocol}/broadcast/{session_id}"
-    pub fn new_broadcast(protocol: impl Into<String>, session_id: u16) -> Self {
-        let protocol = protocol.into();
-        let topic_str = format!("{}/broadcast/{}", protocol, session_id);
-        Self {
-            inner: IdentTopic::new(topic_str),
-            protocol,
-        }
-    }
-
-    /// Creates a new P2P topic
-    /// Format: "{protocol}/p2p/{session_id}/{party_id}"
-    pub fn new_p2p(protocol: impl Into<String>, session_id: u16, party_id: u16) -> Self {
-        let protocol = protocol.into();
-        let topic_str = format!("{}/p2p/{}/{}", protocol, session_id, party_id);
-        Self {
-            inner: IdentTopic::new(topic_str),
-            protocol,
-        }
-    }
-
-    /// Creates a Topic from an existing IdentTopic
-    /// Note: This assumes the topic string follows the expected format
-    pub fn from_ident_topic(topic: IdentTopic, protocol: impl Into<String>) -> Self {
-        Self {
-            inner: topic,
-            protocol: protocol.into(),
-        }
-    }
-
-    /// Checks if this is a broadcast topic
-    /// Expected format: "{protocol}/broadcast/{session_id}"
-    pub fn is_broadcast(&self) -> bool {
-        let topic_str = self.inner.to_string();
-        let parts: Vec<&str> = topic_str.split('/').collect();
-        parts.len() == 3 && parts[1] == "broadcast"
-    }
-
-    /// Checks if this is a P2P topic
-    /// Expected format: "{protocol}/p2p/{session_id}/{party_id}"
-    pub fn is_p2p(&self) -> bool {
-        let topic_str = self.inner.to_string();
-        let parts: Vec<&str> = topic_str.split('/').collect();
-        parts.len() == 4 && parts[1] == "p2p"
-    }
-
-    /// Extracts the session ID from a topic string if present
-    pub fn session_id(&self) -> Option<u16> {
-        let topic_str = self.inner.to_string();
-        let parts: Vec<&str> = topic_str.split('/').collect();
-        match parts.as_slice() {
-            // Broadcast format: protocol/broadcast/session_id
-            [_, "broadcast", session_id] => session_id.parse().ok(),
-            // P2P format: protocol/p2p/session_id/party_id
-            [_, "p2p", session_id, _] => session_id.parse().ok(),
-            _ => None,
-        }
-    }
-
-    /// Extracts the party ID from a P2P topic string if present
-    pub fn party_id(&self) -> Option<u16> {
-        let topic_str = self.inner.to_string();
-        let parts: Vec<&str> = topic_str.split('/').collect();
-        match parts.as_slice() {
-            // P2P format: protocol/p2p/session_id/party_id
-            [_, "p2p", _, party_id] => party_id.parse().ok(),
-            _ => None,
-        }
-    }
-
-    /// Gets the topic hash for storage/lookup
-    pub fn hash(&self) -> TopicHash {
-        self.inner.hash()
-    }
-
-    /// Gets a reference to the underlying IdentTopic
-    pub fn as_ident_topic(&self) -> &IdentTopic {
-        &self.inner
     }
 }

@@ -30,8 +30,8 @@
 //! - The ExecutionIdCoordination doesn't validate uniqueness of execution IDs
 use crate::error::Error;
 use crate::network::{Receiver, Sender};
-use crate::p2p::P2PDelivery; // Update imports
-use crate::p2p_node::{P2PConfig, P2PNode};
+use crate::p2p::P2PDelivery;
+use crate::p2p_node::P2PNode;
 use crate::storage::KeyStorage;
 use crate::{network, signing};
 use cggmp21::key_share::AuxInfo;
