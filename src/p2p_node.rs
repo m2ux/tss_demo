@@ -1,4 +1,4 @@
-//! P2P-based delivery layer for distributed protocol communication.
+//! P2P node for distributed protocol communication.
 //!
 //! This module provides P2P networking capabilities using libp2p for peer-to-peer
 //! message routing and discovery. It implements:
@@ -219,12 +219,14 @@ impl P2PNode {
                 )
                 .unwrap();
 
+                // Combine all behaviors into a single AgentBehaviour
                 AgentBehaviour::new(kad, identify, gossipsub)
             })
             .map_err(|e| P2PError::Protocol(e.to_string()))?
             .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(30)))
             .build();
 
+        // Set the node to server mode
         swarm.behaviour_mut().set_server_mode();
 
         // Listen address setup

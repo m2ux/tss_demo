@@ -1,4 +1,4 @@
-//! P2P network behavior implementation for the CGGMP21 protocol.
+//! P2P network behavior implementation
 //!
 //! This module defines the network behavior for P2P nodes, combining multiple libp2p
 //! protocols:

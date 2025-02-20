@@ -1,6 +1,6 @@
 # CGGMP21 ECDSA Threshold Signature Demo
 
-A committee-based secure distributed signing service based upon the CGGMP21/FROST TSS scheme.
+A committee-based secure distributed signing service based upon the CGGMP21 TSS scheme.
 
 > [!WARNING]
 > This project is in early development and is not guaranteed to be secure or stable. Use at your own risk.
@@ -168,8 +168,9 @@ src/
 ├── committee.rs     - Committee protocol implementation
 ├── signing.rs       - Signing protocol implementation
 ├── p2p_node.rs      - P2P networking core
-├── p2p.rs           - P2P message delivery
+├── p2p_delivery.rs  - P2P message delivery
 ├── p2p_behaviour.rs - P2P behavior implementation
+├── p2p_topic.rs     - P2P topic handling
 ├── service.rs       - Signing service implementation
 ├── message.rs       - Protocol message definitions
 ├── network.rs       - Network abstractions
@@ -257,4 +258,5 @@ For issues and feature requests, please use the GitHub issue tracker.
 
 ## Disclaimer
 
-This implementation is provided as-is. Users should perform their own security review before using in production environments.
+This implementation is provided as-is. This code is *not* audited and should *not* be used in production.
+```
