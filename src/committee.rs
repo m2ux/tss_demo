@@ -50,6 +50,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::Instant;
+use crate::protocol::ProtocolError;
 
 /// Represents the various stages of committee initialization and operation
 ///
@@ -165,6 +166,7 @@ pub struct Protocol {
     /// Signing protocol implementation
     signing: signing::Protocol,
     p2p_node: Arc<P2PNode>,
+    //tss_protocol: TssProtocol,
     party_id: u16,
 }
 
@@ -327,10 +329,10 @@ impl Protocol {
                             committee_state = CommitteeState::EstablishingExecutionId;
                             context.deadline = None;
                         } else {
-                            return Err(Error::Protocol(format!(
+                            return Err(Error::Protocol(ProtocolError::Other(format!(
                                 "Insufficient parties ({}) available to form a committee!",
                                 context.committee_members.len()
-                            )));
+                            ))));
                         }
                     } else {
                         sender
@@ -396,12 +398,19 @@ impl Protocol {
                 CommitteeState::GeneratingAuxInfo => {
                     let execution_id = self.storage.load::<String>("execution_id")?;
 
+                    // Create P2P delivery instance for aux info generation
+                    let delivery = P2PDelivery::<AuxOnlyMsg<Sha256, SecurityLevel128>>::connect(
+                        Arc::clone(&self.p2p_node),
+                        party_id,
+                        CommitteeSession::Protocol,
+                    ).await?;
+
                     // Generate auxiliary info as per CGGMP21
                     let aux_info = Protocol::generate_auxiliary_info(
-                        Arc::clone(&self.p2p_node),
                         party_id,
                         context.committee_members.len() as u16,
                         ExecutionId::new(execution_id.as_bytes()),
+                        delivery,
                     )
                     .await?;
                     self.storage.save("aux_info", &aux_info)?;
@@ -424,11 +433,20 @@ impl Protocol {
                     // Perform distributed key generation
                     let execution_id = self.storage.load::<String>("execution_id")?;
 
-                    let incomplete_key_share = Protocol::generate_key_share(
+                    // Create P2P delivery instance
+                    let delivery = P2PDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
                         Arc::clone(&self.p2p_node),
+                        party_id,
+                        CommitteeSession::Protocol,
+                    ).await?;
+
+                    // Generate key share
+                    let incomplete_key_share = Protocol::generate_key_share(
                         party_id,
                         &context.committee_members,
                         ExecutionId::new(execution_id.as_bytes()),
+                        3,
+                        delivery,
                     )
                     .await?;
 
@@ -437,7 +455,7 @@ impl Protocol {
 
                     // Reconstruct the key share
                     let key_share = cggmp21::KeyShare::from_parts((incomplete_key_share, aux_info))
-                        .map_err(|e| Error::Protocol(e.to_string()))?;
+                        .map_err(|e| Error::Protocol(ProtocolError::InvalidShare(e.to_string())))?;
 
                     self.storage.save_key_share("key_share", &key_share)?;
 
@@ -565,26 +583,18 @@ impl Protocol {
     /// # Returns
     /// * `Result<AuxInfo, Error>` - Generated auxiliary information or error
     async fn generate_auxiliary_info(
-        p2p_node: Arc<P2PNode>,
         party_id: u16,
         n_parties: u16,
         eid: ExecutionId<'_>,
+        delivery: P2PDelivery::<AuxOnlyMsg<Sha256, SecurityLevel128>>,
     ) -> Result<AuxInfo, Error> {
         println!("Generating auxiliary information for party {}", party_id);
-
-        // Create P2P delivery instance for aux info generation
-        let delivery = P2PDelivery::<AuxOnlyMsg<Sha256, SecurityLevel128>>::connect(
-            p2p_node,
-            party_id,
-            CommitteeSession::Protocol,
-        )
-        .await?;
 
         let primes = PregeneratedPrimes::generate(&mut OsRng);
         let aux_info = cggmp21::aux_info_gen(eid, party_id, n_parties, primes)
             .start(&mut OsRng, MpcParty::connected(delivery))
             .await
-            .map_err(|e| Error::Protocol(e.to_string()))?;
+            .map_err(|e| Error::Protocol(ProtocolError::AuxGenFailed(e.to_string())))?;
 
         println!("Auxiliary information generated successfully");
         Ok(aux_info)
@@ -601,27 +611,20 @@ impl Protocol {
     /// # Returns
     /// * `Result<CoreKeyShare<Secp256k1>, Error>` - Generated key share or error
     async fn generate_key_share(
-        p2p_node: Arc<P2PNode>,
         party_id: u16,
         committee: &HashSet<u16>,
         eid: ExecutionId<'_>,
+        threshold: u16,
+        delivery: P2PDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>,
     ) -> Result<CoreKeyShare<Secp256k1>, Error> {
         println!("Starting distributed key generation for party {}", party_id);
 
-        // Create P2P delivery instance for key generation
-        let delivery = P2PDelivery::<ThresholdMsg<Secp256k1, SecurityLevel128, Sha256>>::connect(
-            p2p_node,
-            party_id,
-            CommitteeSession::Protocol,
-        )
-        .await?;
-
         let keygen = cggmp21::keygen::<Secp256k1>(eid, party_id, committee.len() as u16)
-            .set_threshold(3)
+            .set_threshold(threshold)
             .enforce_reliable_broadcast(true)
             .start(&mut OsRng, MpcParty::connected(delivery))
             .await
-            .map_err(|e| Error::Protocol(e.to_string()))?;
+            .map_err(|e| Error::Protocol(ProtocolError::KeyGenFailed(e.to_string())))?;
 
         Ok(keygen)
     }

@@ -85,7 +85,7 @@
 //!    potentially leaking information about signatures
 //! - Some state transitions lack proper error handling, leading to potential protocol violations
 //! 
-use crate::committee::{CommitteeSession, ControlMessage};
+use crate::committee::CommitteeSession;
 use crate::error::Error;
 use crate::network;
 use crate::network::{Receiver, Sender};
@@ -93,7 +93,6 @@ use crate::p2p::P2PDelivery;
 use crate::p2p_node::P2PNode;
 use crate::signing::fsm::Input;
 use crate::storage::KeyStorage;
-use crate::websocket::WsDelivery;
 use cggmp21::supported_curves::Secp256k1;
 use cggmp21::{ExecutionId, Signature};
 use futures_util::StreamExt;
@@ -108,6 +107,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
+use crate::protocol::ProtocolError;
 
 state_machine! {
     /// State machine definition for the CGGMP21 signing protocol.
@@ -977,7 +977,7 @@ async fn handle_signing_request(
     let signature = cggmp21::signing(execution_id, party_id, signing_parties, &key_share)
         .sign(&mut OsRng, MpcParty::connected(delivery), data_to_sign)
         .await
-        .map_err(|e| Error::Protocol(e.to_string()))?;
+        .map_err(|e| Error::Protocol(ProtocolError::InvalidSignature(e.to_string())))?;
 
     Ok(signature)
 }

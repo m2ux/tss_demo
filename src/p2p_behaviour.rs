@@ -37,7 +37,7 @@ use libp2p::swarm::NetworkBehaviour;
 use libp2p::{gossipsub, identify, Multiaddr, PeerId};
 use libp2p_gossipsub::{Hasher, MessageId, PublishError, SubscriptionError, Topic, TopicHash};
 use libp2p_kad::store::MemoryStore;
-use libp2p_kad::{store, Addresses, EntryView, KBucketKey, PeerInfo, QueryId, RecordKey};
+use libp2p_kad::{store, Addresses, EntryView, KBucketKey, QueryId, RecordKey};
 
 /// Network behavior implementation combining Kademlia, GossipSub, and Identify protocols.
 ///

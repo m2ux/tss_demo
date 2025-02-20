@@ -25,7 +25,7 @@
 //! }
 //! ```
 
-use crate::network;
+use crate::{network, protocol};
 use crate::server::ServerError;
 use crate::storage;
 
@@ -66,10 +66,10 @@ use crate::storage;
 /// ```
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// Errors that occur during the execution of the CGGMP21 protocol.
+    /// Errors that occur during the execution of the TSS protocol.
     /// These are protocol-specific errors such as invalid shares, failed verification, etc.
     #[error("Protocol error: {0}")]
-    Protocol(String),
+    Protocol(#[from] protocol::ProtocolError),
 
     /// Network communication errors, including connection failures,
     /// message delivery issues, and WebSocket-related problems.

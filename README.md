@@ -1,10 +1,13 @@
 # CGGMP21 ECDSA Threshold Signature Demo
 
-A Rust demo implementation of the CGGMP21 threshold signature scheme for secure distributed signing operations.
+A committee-based secure distributed signing service based upon the CGGMP21/FROST TSS scheme.
+
+> [!WARNING]
+> This project is in early development and is not guaranteed to be secure or stable. Use at your own risk.
 
 ## Overview
 
-This project implements the CGGMP21 protocol for distributed threshold signing operations, allowing a committee of parties to collectively manage cryptographic operations without requiring complete trust between participants. The implementation uses a P2P network architecture for secure communication and coordination.
+This project uses a CGGMP21/FROST protocol for distributed threshold signing operations, allowing a committee of parties to collectively manage cryptographic operations without requiring complete trust between participants. The implementation uses a P2P network architecture for secure communication and coordination.
 
 ## Features
 
@@ -28,7 +31,7 @@ This project implements the CGGMP21 protocol for distributed threshold signing o
     - Session-based message routing
 
 - **Protocol Security**
-    - CGGMP21 threshold signature scheme
+    - Threshold signature scheme
     - LibP2P Noise encryption for P2P communication
     - AES-GCM encrypted key share storage
     - Message authentication using GossipSub
@@ -50,7 +53,7 @@ This project implements the CGGMP21 protocol for distributed threshold signing o
 
 3. **Key Generation**
     - Members generate auxiliary information
-    - Perform distributed key generation (CGGMP21)
+    - Perform distributed key generation
     - Store encrypted key shares (AES-GCM)
     - Members announce readiness for signing
 

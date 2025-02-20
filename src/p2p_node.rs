@@ -788,7 +788,7 @@ impl P2PNode {
     /// - Topic parsing is performed immutably
     ///
     async fn handle_incoming_message(node: &Arc<Self>, topic_hash: TopicHash, data: Vec<u8>) {
-        debug!("Incoming message on topic: {}", topic.hash());
+        debug!("Incoming message on topic: {}", topic_hash);
 
         let sessions = node.sessions.read().await;
         let topic = ProtocolTopic::from_protocol(topic_hash, node.protocol.clone());

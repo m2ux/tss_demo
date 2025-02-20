@@ -17,7 +17,7 @@
 
 use crate::committee::{CommitteeSession, ControlMessage};
 use crate::error::Error;
-use crate::network::{Receiver, Sender};
+use crate::network::Receiver;
 use crate::signing::Message;
 use futures_util::StreamExt;
 use round_based::Delivery;
