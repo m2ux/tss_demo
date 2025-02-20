@@ -26,7 +26,7 @@
 //! ```
 
 use crate::{network, protocol};
-use crate::server::ServerError;
+use crate::ws_server::ServerError;
 use crate::storage;
 
 /// Comprehensive error type encompassing all possible failure modes.
@@ -95,10 +95,6 @@ pub enum Error {
     /// typically when processing messages or storing data.
     #[error("Serialization error: {0}")]
     Serialization(#[from] bincode::Error),
-
-    /// Message parsing or protocol errors
-    #[error("Message error: {0}")]
-    Message(String),
 
     #[error("Server error: {0}")]
     Server(#[from] ServerError),

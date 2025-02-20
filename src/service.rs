@@ -53,7 +53,7 @@ state_machine! {
     }
 }
 
-use crate::p2p::P2PDelivery;
+use crate::p2p_delivery::P2PDelivery;
 use crate::p2p_node::P2PNode;
 use service::Input;
 

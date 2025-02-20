@@ -89,7 +89,7 @@ use crate::committee::CommitteeSession;
 use crate::error::Error;
 use crate::network;
 use crate::network::{Receiver, Sender};
-use crate::p2p::P2PDelivery;
+use crate::p2p_delivery::P2PDelivery;
 use crate::p2p_node::P2PNode;
 use crate::signing::fsm::Input;
 use crate::storage::KeyStorage;
