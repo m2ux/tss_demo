@@ -1,10 +1,13 @@
 # CGGMP21 ECDSA Threshold Signature Demo
 
-A Rust demo implementation of the CGGMP21 threshold signature scheme for secure distributed signing operations.
+A committee-based secure distributed signing service based upon the CGGMP21 TSS scheme.
+
+> [!WARNING]
+> This project is in early development and is not guaranteed to be secure or stable. Use at your own risk.
 
 ## Overview
 
-This project implements the CGGMP21 protocol for distributed threshold signing operations, allowing a committee of parties to collectively manage cryptographic operations without requiring complete trust between participants. The implementation uses a P2P network architecture for secure communication and coordination.
+This project uses a CGGMP21/FROST protocol for distributed threshold signing operations, allowing a committee of parties to collectively manage cryptographic operations without requiring complete trust between participants. The implementation uses a P2P network architecture for secure communication and coordination.
 
 ## Features
 
@@ -28,7 +31,7 @@ This project implements the CGGMP21 protocol for distributed threshold signing o
     - Session-based message routing
 
 - **Protocol Security**
-    - CGGMP21 threshold signature scheme
+    - Threshold signature scheme
     - LibP2P Noise encryption for P2P communication
     - AES-GCM encrypted key share storage
     - Message authentication using GossipSub
@@ -50,7 +53,7 @@ This project implements the CGGMP21 protocol for distributed threshold signing o
 
 3. **Key Generation**
     - Members generate auxiliary information
-    - Perform distributed key generation (CGGMP21)
+    - Perform distributed key generation
     - Store encrypted key shares (AES-GCM)
     - Members announce readiness for signing
 
@@ -165,8 +168,9 @@ src/
 ├── committee.rs     - Committee protocol implementation
 ├── signing.rs       - Signing protocol implementation
 ├── p2p_node.rs      - P2P networking core
-├── p2p.rs           - P2P message delivery
+├── p2p_delivery.rs  - P2P message delivery
 ├── p2p_behaviour.rs - P2P behavior implementation
+├── p2p_topic.rs     - P2P topic handling
 ├── service.rs       - Signing service implementation
 ├── message.rs       - Protocol message definitions
 ├── network.rs       - Network abstractions
@@ -254,4 +258,5 @@ For issues and feature requests, please use the GitHub issue tracker.
 
 ## Disclaimer
 
-This implementation is provided as-is. Users should perform their own security review before using in production environments.
+This implementation is provided as-is. This code is *not* audited and should *not* be used in production.
+```

@@ -240,3 +240,116 @@ where
             .map_err(Error::Network)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::pin::Pin;
+    use tokio_test::block_on;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    // Helper function to create a test NetworkMessage
+    fn create_test_message() -> NetworkMessage {
+        // Note: You'll need to implement this based on your NetworkMessage structure
+        unimplemented!("Implement based on your NetworkMessage type")
+    }
+
+    #[test]
+    fn test_websocket_error_display() {
+        let conn_err = WebSocketError::Connection(
+            tungstenite::Error::ConnectionClosed
+        );
+        assert!(format!("{}", conn_err).contains("Connection error"));
+
+        let proto_err = WebSocketError::Protocol("Invalid message".to_string());
+        assert!(format!("{}", proto_err).contains("Protocol error"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_binary() {
+        let test_msg = create_test_message();
+        let binary_data = bincode::serialize(&test_msg).unwrap();
+        let ws_msg = WsMessage::Binary(binary_data);
+
+        match WebSocketMessageStream::handle_message(ws_msg) {
+            Ok(Some(msg)) => {
+                // Compare msg with test_msg
+                // You'll need to implement comparison based on your NetworkMessage type
+            }
+            _ => panic!("Expected Some(NetworkMessage)"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_control() {
+        let ping = WsMessage::Ping(vec![]);
+        assert!(matches!(
+            WebSocketMessageStream::handle_message(ping),
+            Ok(None)
+        ));
+
+        let pong = WsMessage::Pong(vec![]);
+        assert!(matches!(
+            WebSocketMessageStream::handle_message(pong),
+            Ok(None)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_close() {
+        let close = WsMessage::Close(None);
+        assert!(matches!(
+            WebSocketMessageStream::handle_message(close),
+            Ok(None)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_invalid() {
+        let invalid_data = vec![1, 2, 3]; // Invalid serialized data
+        let ws_msg = WsMessage::Binary(invalid_data);
+
+        match WebSocketMessageStream::handle_message(ws_msg) {
+            Err(WebSocketError::Serialization(_)) => (),
+            _ => panic!("Expected serialization error"),
+        }
+    }
+
+    // Mock WebSocket Stream for testing
+    struct MockWebSocket {
+        messages: Vec<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>,
+    }
+
+    impl MockWebSocket {
+        fn new(messages: Vec<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>) -> Self {
+            Self { messages }
+        }
+    }
+
+    impl Stream for MockWebSocket {
+        type Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Option<Self::Item>> {
+            Poll::Ready(self.messages.pop())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stream_implementation() {
+        // Test implementation here using MockWebSocket
+    }
+
+    #[tokio::test]
+    async fn test_sink_implementation() {
+        // Test implementation here using MockWebSocket
+    }
+
+    #[tokio::test]
+    async fn test_delivery_connect() {
+        // Test WsDelivery connect method
+        // Note: This will require mocking the WebSocket connection
+    }
+}

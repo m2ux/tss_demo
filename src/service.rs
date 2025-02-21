@@ -17,7 +17,7 @@
 
 use crate::committee::{CommitteeSession, ControlMessage};
 use crate::error::Error;
-use crate::network::{Receiver, Sender};
+use crate::network::Receiver;
 use crate::signing::Message;
 use futures_util::StreamExt;
 use round_based::Delivery;
@@ -53,7 +53,7 @@ state_machine! {
     }
 }
 
-use crate::p2p::P2PDelivery;
+use crate::p2p_delivery::P2PDelivery;
 use crate::p2p_node::P2PNode;
 use service::Input;
 
