@@ -138,19 +138,19 @@ cargo build --release
 
 Start a bootstrap node for peer discovery:
 ```bash
-cggmp21-demo bootstrap
+cargo run --release bootstrap
 ```
 
 Start committee members (run 3 or more):
 ```bash
-cggmp21-demo committee --party-id 1
-cggmp21-demo committee --party-id 2
-cggmp21-demo committee --party-id 3
+cargo run --release committee --party-id 0
+cargo run --release committee --party-id 1
+cargo run --release committee --party-id 2
 ```
 
 Start a service node to request signatures:
 ```bash
-cggmp21-demo service
+cargo run --release service
 ```
 
 Note: Each node type uses specific ports:
